@@ -54,6 +54,11 @@ def solve_creep_time_series(model: Model, *, time_end: float, nsubsteps: int, en
     sy, etan = 1e20, 0.0  # Default infinite yield
     if mat.plasticity:
         sy, etan = mat.plasticity
+
+    # Thermal strain
+    eps_thermal = 0.0
+    if model.uniform_temperature is not None and mat.alp is not None and mat.reft is not None:
+        eps_thermal = mat.alp * (model.uniform_temperature - mat.reft)
     
     # Section properties
     if not model.sections:
@@ -164,8 +169,8 @@ def solve_creep_time_series(model: Model, *, time_end: float, nsubsteps: int, en
                 eps_total = eps_ax - ip.y * kz_mid + ip.z * ky_mid
                 
                 # Trial Stress (elastic prediction)
-                # sigma_trial = E * (eps_total - eps_cr - eps_pl_old)
-                sigma_trial = E * (eps_total - ip.eps_cr - ip.eps_pl)
+                # sigma_trial = E * (eps_total - eps_thermal - eps_cr - eps_pl_old)
+                sigma_trial = E * (eps_total - eps_thermal - ip.eps_cr - ip.eps_pl)
                 
                 # --- Plasticity Return Mapping (1D) ---
                 # Yield function: f = |sigma| - (sy + H * eps_pl_eq)

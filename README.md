@@ -24,19 +24,28 @@ tubo/
 ├── build/                  # [自动生成] 计算结果输出目录 (VTK, PVD)
 ├── src/                    # 源代码目录
 │   └── tubo/
-│       ├── cdb/            # ANSYS CDB 文件解析模块
-│       ├── solver/         # 有限元求解器核心 (刚度组装、蠕变迭代、模态耦合)
-│       ├── vtk/            # 可视化模块 (VTK 导出、曲面重构)
-│       ├── cli.py          # 命令行入口
-│       └── model.py        # 数据模型定义 (节点、单元、材料)
+│       ├── cdb/            # ANSYS CDB 文件解析模块 (Parser)
+│       ├── solver/         # 有限元求解器核心
+│       │   ├── assembly.py # 刚度矩阵组装、自由度映射、载荷等效
+│       │   ├── creep.py    # 蠕变/塑性时间步进求解器 (截面积分法)
+│       │   ├── linear_static.py # 线性静力求解器
+│       │   └── modal.py    # 模态分析 (预留)
+│       ├── vtk/            # 可视化模块
+│       │   ├── writer.py   # VTK Legacy PolyData 导出
+│       │   ├── surface.py  # 3D 曲面重构与拓扑生成
+│       │   └── pvd.py      # PVD 时间序列文件生成
+│       ├── cli.py          # 命令行入口 (Command Line Interface)
+│       └── model.py        # 数据模型定义 (节点、单元、材料、截面)
 ├── scripts/                # 辅助脚本
 │   ├── verify_physics.py   # 物理精度验证脚本 (弹性、Karman、蠕变)
+│   ├── verify_results_data.py # 综合算例数值验证脚本
 │   └── compare_*.py        # 结果对比工具
 ├── 开放原子-管单元/        # 赛题提供的输入算例 (CDB)
 ├── run_all_cases.sh        # 一键运行所有算例的脚本
 ├── TECHNICAL_REPORT.md     # 技术实现报告 (理论基础)
 ├── IMPLEMENTATION_GUIDE.md # 开发路线图
 ├── VERIFICATION.md         # 精度验证报告
+├── DETAILED_DESIGN_DOC.md  # 详细设计文档
 └── README.md               # 项目主文档
 ```
 

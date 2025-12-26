@@ -180,8 +180,11 @@ def _beam_T(R: np.ndarray) -> np.ndarray:
     return T
 
 
-def _udl_equiv_nodal_local(wy: float, wz: float, L: float) -> np.ndarray:
+def _udl_equiv_nodal_local(wx: float, wy: float, wz: float, L: float) -> np.ndarray:
     f = np.zeros(14, dtype=float)
+
+    f[0] += wx * L / 2
+    f[7] += wx * L / 2
 
     f[1] += wy * L / 2
     f[8] += wy * L / 2
@@ -302,7 +305,7 @@ def assemble_linear_system(
             gvec = np.array([ax, ay, az], dtype=float)
             qg = mat.dens * A * gvec
             ql = R.T @ qg
-            f_local = _udl_equiv_nodal_local(wy=ql[1], wz=ql[2], L=L)
+            f_local = _udl_equiv_nodal_local(wx=ql[0], wy=ql[1], wz=ql[2], L=L)
             f_global = T.T @ f_local
             F[dofs_arr] += f_global
 
@@ -467,8 +470,8 @@ def assemble_linear_system(
             q_local = info.R.T @ q_global
             
             # q_local[0] is axial (x), q_local[1] is y, q_local[2] is z
-            # We apply transverse loads
-            f_equiv_local = _udl_equiv_nodal_local(wy=q_local[1], wz=q_local[2], L=info.L)
+            # We apply transverse loads and axial loads
+            f_equiv_local = _udl_equiv_nodal_local(wx=q_local[0], wy=q_local[1], wz=q_local[2], L=info.L)
             
             # Transform forces back to global
             f_equiv_global = info.T.T @ f_equiv_local
