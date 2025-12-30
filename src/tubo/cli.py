@@ -42,7 +42,8 @@ def main(argv: list[str] | None = None) -> int:
             # simplistic: SectionPipe has od and t (outer diameter and thickness)
             try:
                 sec = next(iter(model.sections.values()))
-                radius = float(sec.od) * 0.5
+                # SectionPipe stores `outer_diameter`; use its `ro` property when available
+                radius = float(getattr(sec, "ro", 0.5 * getattr(sec, "outer_diameter", 1.0)))
             except Exception:
                 radius = 1.0
             centerline = result["node_ids"].tolist()

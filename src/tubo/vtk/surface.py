@@ -157,32 +157,82 @@ def write_pipe_surface_quads(
             quads = []
             modal_radii = []
             
-            centers = [model.nodes[nid] for nid in p_nodes]
-            frames = []
-            for i in range(len(centers)):
-                # Tangent estimation
-                if i < len(centers) - 1:
-                    p0 = (centers[i].x, centers[i].y, centers[i].z)
-                    p1 = (centers[i+1].x, centers[i+1].y, centers[i+1].z)
-                    d = _safe_dir(p0, p1)
+            # Build center coordinates, removing consecutive duplicates (zero-length segments)
+            raw_centers = [model.nodes[nid] for nid in p_nodes]
+            centers: list = []
+            node_map: list = []
+            tol = 1e-9
+            for nd in raw_centers:
+                if not centers:
+                    centers.append(nd)
+                    node_map.append(nd)
                 else:
-                    # Last node, use previous direction
-                    p0 = (centers[i-1].x, centers[i-1].y, centers[i-1].z)
+                    prev = centers[-1]
+                    if abs(prev.x - nd.x) < tol and abs(prev.y - nd.y) < tol and abs(prev.z - nd.z) < tol:
+                        # skip duplicate center
+                        continue
+                    centers.append(nd)
+                    node_map.append(nd)
+
+            # Compute smooth tangents using forward/backward averaging to avoid flipped frames
+            frames = []
+            tangents = []
+            for i in range(len(centers)):
+                if i == 0:
+                    p0 = (centers[i].x, centers[i].y, centers[i].z)
+                    p1 = (centers[i + 1].x, centers[i + 1].y, centers[i + 1].z)
+                    d1 = _safe_dir(p0, p1)
+                    d = d1
+                elif i == len(centers) - 1:
+                    p0 = (centers[i - 1].x, centers[i - 1].y, centers[i - 1].z)
                     p1 = (centers[i].x, centers[i].y, centers[i].z)
-                    d = _safe_dir(p0, p1)
-                
+                    d2 = _safe_dir(p0, p1)
+                    d = d2
+                else:
+                    p_prev = (centers[i - 1].x, centers[i - 1].y, centers[i - 1].z)
+                    p_curr = (centers[i].x, centers[i].y, centers[i].z)
+                    p_next = (centers[i + 1].x, centers[i + 1].y, centers[i + 1].z)
+                    v_prev = (p_curr[0] - p_prev[0], p_curr[1] - p_prev[1], p_curr[2] - p_prev[2])
+                    v_next = (p_next[0] - p_curr[0], p_next[1] - p_curr[1], p_next[2] - p_curr[2])
+                    d_prev = _safe_dir(p_prev, p_curr)
+                    d_next = _safe_dir(p_curr, p_next)
+                    # Use a length-weighted bisector to round corners smoothly
+                    len_prev = math.sqrt(v_prev[0] * v_prev[0] + v_prev[1] * v_prev[1] + v_prev[2] * v_prev[2])
+                    len_next = math.sqrt(v_next[0] * v_next[0] + v_next[1] * v_next[1] + v_next[2] * v_next[2])
+                    w_prev = len_prev if len_prev > 0 else 1.0
+                    w_next = len_next if len_next > 0 else 1.0
+                    d = (
+                        w_prev * d_prev[0] + w_next * d_next[0],
+                        w_prev * d_prev[1] + w_next * d_next[1],
+                        w_prev * d_prev[2] + w_next * d_next[2],
+                    )
+                    nd = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+                    if nd == 0:
+                        d = d_next
+                    else:
+                        d = (d[0] / nd, d[1] / nd, d[2] / nd)
+                tangents.append(d)
                 u, v = _orthonormal(d)
+                # ensure continuity: flip if inconsistent with previous u
+                if frames:
+                    pu, pv = frames[-1]
+                    dot = pu[0] * u[0] + pu[1] * u[1] + pu[2] * u[2]
+                    if dot < 0:
+                        u = (-u[0], -u[1], -u[2])
+                        v = (-v[0], -v[1], -v[2])
                 frames.append((u, v))
             
             ring_offset = []
             for i, c in enumerate(centers):
                 u, v = frames[i]
                 ring_offset.append(len(pts))
+                # per-node radius: if different radii are expected per section, user can extend here
+                r = radius
                 for k in range(n_circ):
                     theta = 2.0 * math.pi * (k / n_circ)
-                    px = c.x + radius * (math.cos(theta) * u[0] + math.sin(theta) * v[0])
-                    py = c.y + radius * (math.cos(theta) * u[1] + math.sin(theta) * v[1])
-                    pz = c.z + radius * (math.cos(theta) * u[2] + math.sin(theta) * v[2])
+                    px = c.x + r * (math.cos(theta) * u[0] + math.sin(theta) * v[0])
+                    py = c.y + r * (math.cos(theta) * u[1] + math.sin(theta) * v[1])
+                    pz = c.z + r * (math.cos(theta) * u[2] + math.sin(theta) * v[2])
                     pts.append((px, py, pz))
                     modal_radii.append(0.0)
             

@@ -77,12 +77,12 @@ def expand_surface_with_modal(
         - modal_radii: Per-point radial displacement (for visualization coloring)
     """
     import numpy as np
-    
+
     def _safe_dir(p0, p1):
         dx = np.array(p1) - np.array(p0)
         n = np.linalg.norm(dx)
         return (dx / n) if n > 0 else np.array([1.0, 0.0, 0.0])
-    
+
     def _orthonormal(d):
         ax = np.array([0.0, 0.0, 1.0]) if abs(d[2]) < 0.9 else np.array([0.0, 1.0, 0.0])
         u = np.cross(d, ax)
@@ -90,21 +90,61 @@ def expand_surface_with_modal(
         u = (u / nu) if nu > 0 else np.array([1.0, 0.0, 0.0])
         v = np.cross(d, u)
         return u, v
-    
-    centers = [model.nodes[nid] for nid in centerline_nodes]
+
+    # Remove consecutive duplicate points to avoid zero-length tangents
+    centers_raw = [model.nodes[nid] for nid in centerline_nodes]
+    centers: list = []
+    node_ids: list[int] = []
+    tol = 1e-9
+    for nid, nd in zip(centerline_nodes, centers_raw):
+        if not centers:
+            centers.append(nd)
+            node_ids.append(nid)
+            continue
+        prev = centers[-1]
+        if abs(prev.x - nd.x) < tol and abs(prev.y - nd.y) < tol and abs(prev.z - nd.z) < tol:
+            continue
+        centers.append(nd)
+        node_ids.append(nid)
+
+    if len(centers) < 2:
+        return [], [], []
+
+    # Build smooth, continuous frames along the path to avoid orientation flips
     frames = []
-    
     for i in range(len(centers)):
-        p0 = np.array([centers[i].x, centers[i].y, centers[i].z])
-        p1 = np.array([
-            centers[min(i + 1, len(centers) - 1)].x,
-            centers[min(i + 1, len(centers) - 1)].y,
-            centers[min(i + 1, len(centers) - 1)].z,
-        ])
-        d = _safe_dir(p0, p1)
+        if i == 0:
+            p0 = np.array([centers[i].x, centers[i].y, centers[i].z])
+            p1 = np.array([centers[i + 1].x, centers[i + 1].y, centers[i + 1].z])
+            d = _safe_dir(p0, p1)
+        elif i == len(centers) - 1:
+            p0 = np.array([centers[i - 1].x, centers[i - 1].y, centers[i - 1].z])
+            p1 = np.array([centers[i].x, centers[i].y, centers[i].z])
+            d = _safe_dir(p0, p1)
+        else:
+            p_prev = np.array([centers[i - 1].x, centers[i - 1].y, centers[i - 1].z])
+            p_curr = np.array([centers[i].x, centers[i].y, centers[i].z])
+            p_next = np.array([centers[i + 1].x, centers[i + 1].y, centers[i + 1].z])
+            v_prev = p_curr - p_prev
+            v_next = p_next - p_curr
+            d_prev = _safe_dir(p_prev, p_curr)
+            d_next = _safe_dir(p_curr, p_next)
+            len_prev = float(np.linalg.norm(v_prev))
+            len_next = float(np.linalg.norm(v_next))
+            w_prev = len_prev if len_prev > 0 else 1.0
+            w_next = len_next if len_next > 0 else 1.0
+            d = w_prev * d_prev + w_next * d_next
+            nd = np.linalg.norm(d)
+            d = d_next if nd == 0 else (d / nd)
+
         u, v = _orthonormal(d)
+        if frames:
+            prev_u, _ = frames[-1]
+            if float(np.dot(prev_u, u)) < 0.0:
+                u = -u
+                v = -v
         frames.append((u, v))
-    
+
     pts = []
     modal_radii = []
     ring_offset = []
@@ -113,7 +153,7 @@ def expand_surface_with_modal(
         u, v = frames[i]
         ring_offset.append(len(pts))
         
-        nid = centerline_nodes[i]
+        nid = node_ids[i]
         modal_amps = {}
         if modal_state is not None:
             modal_amps = modal_state.modal_amplitudes.get(nid, {})
