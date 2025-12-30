@@ -8,7 +8,7 @@ import numpy as np
 from ..model import Model, Material
 
 
-_DOF_ORDER = ("UX", "UY", "UZ", "ROTX", "ROTY", "ROTZ", "OVAL")
+_DOF_ORDER = ("UX", "UY", "UZ", "ROTX", "ROTY", "ROTZ", "OVAL", "WARP")
 
 
 @dataclass(frozen=True)
@@ -18,8 +18,8 @@ class ElementKinematics:
     n2: int
     L: float
     R: np.ndarray  # 3x3 local-to-global rotation
-    T: np.ndarray  # 14x14
-    dofs: np.ndarray  # 14 global dof indices
+    T: np.ndarray  # 16x16
+    dofs: np.ndarray  # 16 global dof indices
 
 
 def _section_props_pipe(od: float, t: float) -> tuple[float, float, float, float, float]:
@@ -36,21 +36,21 @@ def _section_props_pipe(od: float, t: float) -> tuple[float, float, float, float
 
 def _beam3d_local_k(E: float, G: float, A: float, Iy: float, Iz: float, J: float, L: float, 
                     ro: float, ri: float, nu: float, curvature: float = 0.0) -> np.ndarray:
-    k = np.zeros((14, 14), dtype=float)
+    k = np.zeros((16, 16), dtype=float)
 
     # axial
     k_ax = E * A / L
     k[0, 0] += k_ax
-    k[0, 7] -= k_ax
-    k[7, 0] -= k_ax
-    k[7, 7] += k_ax
+    k[0, 8] -= k_ax
+    k[8, 0] -= k_ax
+    k[8, 8] += k_ax
 
     # torsion
     k_t = G * J / L
     k[3, 3] += k_t
-    k[3, 10] -= k_t
-    k[10, 3] -= k_t
-    k[10, 10] += k_t
+    k[3, 11] -= k_t
+    k[11, 3] -= k_t
+    k[11, 11] += k_t
 
     # bending about local z (y deflection)
     k1 = 12 * E * Iz / (L**3)
@@ -59,20 +59,20 @@ def _beam3d_local_k(E: float, G: float, A: float, Iy: float, Iz: float, J: float
     k4 = 2 * E * Iz / L
     k[1, 1] += k1
     k[1, 5] += k2
-    k[1, 8] -= k1
-    k[1, 12] += k2
+    k[1, 9] -= k1
+    k[1, 13] += k2
     k[5, 1] += k2
     k[5, 5] += k3
-    k[5, 8] -= k2
-    k[5, 12] += k4
-    k[8, 1] -= k1
-    k[8, 5] -= k2
-    k[8, 8] += k1
-    k[8, 12] -= k2
-    k[12, 1] += k2
-    k[12, 5] += k4
-    k[12, 8] -= k2
-    k[12, 12] += k3
+    k[5, 9] -= k2
+    k[5, 13] += k4
+    k[9, 1] -= k1
+    k[9, 5] -= k2
+    k[9, 9] += k1
+    k[9, 13] -= k2
+    k[13, 1] += k2
+    k[13, 5] += k4
+    k[13, 9] -= k2
+    k[13, 13] += k3
 
     # bending about local y (z deflection)
     k1 = 12 * E * Iy / (L**3)
@@ -81,20 +81,20 @@ def _beam3d_local_k(E: float, G: float, A: float, Iy: float, Iz: float, J: float
     k4 = 2 * E * Iy / L
     k[2, 2] += k1
     k[2, 4] -= k2
-    k[2, 9] -= k1
-    k[2, 11] -= k2
+    k[2, 10] -= k1
+    k[2, 14] -= k2
     k[4, 2] -= k2
     k[4, 4] += k3
-    k[4, 9] += k2
-    k[4, 11] += k4
-    k[9, 2] -= k1
-    k[9, 4] += k2
-    k[9, 9] += k1
-    k[9, 11] += k2
-    k[11, 2] -= k2
-    k[11, 4] += k4
-    k[11, 9] += k2
-    k[11, 11] += k3
+    k[4, 10] += k2
+    k[4, 14] += k4
+    k[10, 2] -= k1
+    k[10, 4] += k2
+    k[10, 10] += k1
+    k[10, 14] += k2
+    k[14, 2] -= k2
+    k[14, 4] += k4
+    k[14, 10] += k2
+    k[14, 14] += k3
 
     # Ovalization (m=2) stiffness
     # Ring bending stiffness D = E * t^3 / (12 * (1 - nu^2))
@@ -129,25 +129,20 @@ def _beam3d_local_k(E: float, G: float, A: float, Iy: float, Iz: float, J: float
         # F_th_z2 = - 0.5 * E * Iz * C * (a1 + a2)
         # F_a1    = - 0.5 * E * Iz * C * (th_z2 - th_z1)
         # F_a2    = - 0.5 * E * Iz * C * (th_z2 - th_z1)
-        
         Kc = 0.5 * E * Iz * C
-        
-        # Rows: 5 (th_z1), 12 (th_z2), 6 (a1), 13 (a2)
-        # F_th_z1 terms
         k[5, 6] += Kc
-        k[5, 13] += Kc
-        
-        # F_th_z2 terms
-        k[12, 6] -= Kc
-        k[12, 13] -= Kc
-        
-        # F_a1 terms
+        k[5, 14] += Kc
+        k[13, 6] -= Kc
+        k[13, 14] -= Kc
         k[6, 5] += Kc
-        k[6, 12] -= Kc
-        
-        # F_a2 terms
-        k[13, 5] += Kc
-        k[13, 12] -= Kc
+        k[6, 13] -= Kc
+        k[14, 5] += Kc
+        k[14, 13] -= Kc
+
+    # Warp DOF penalty (keeps extra DOF numerically stable; no physical coupling yet)
+    warp_penalty = E * A / L * 1e6
+    k[7, 7] += warp_penalty
+    k[15, 15] += warp_penalty
 
     return k
 
@@ -214,34 +209,38 @@ def _rotation_from_x_and_hint(x: np.ndarray, hint: np.ndarray) -> np.ndarray:
 
 
 def _beam_T(R: np.ndarray) -> np.ndarray:
-    T = np.zeros((14, 14), dtype=float)
+    T = np.zeros((16, 16), dtype=float)
     T[0:3, 0:3] = R
     T[3:6, 3:6] = R
     # DOF 6 (OVAL) is scalar, identity
     T[6, 6] = 1.0
+    # DOF 7 (WARP) scalar identity
+    T[7, 7] = 1.0
     
-    T[7:10, 7:10] = R
-    T[10:13, 10:13] = R
-    # DOF 13 (OVAL) is scalar, identity
-    T[13, 13] = 1.0
+    T[8:11, 8:11] = R
+    T[11:14, 11:14] = R
+    # DOF 14 (OVAL) is scalar, identity
+    T[14, 14] = 1.0
+    # DOF 15 (WARP) scalar identity
+    T[15, 15] = 1.0
     return T
 
 
 def _udl_equiv_nodal_local(wx: float, wy: float, wz: float, L: float) -> np.ndarray:
-    f = np.zeros(14, dtype=float)
+    f = np.zeros(16, dtype=float)
 
     f[0] += wx * L / 2
-    f[7] += wx * L / 2
+    f[8] += wx * L / 2
 
     f[1] += wy * L / 2
-    f[8] += wy * L / 2
+    f[9] += wy * L / 2
     f[5] += wy * (L**2) / 12
-    f[12] -= wy * (L**2) / 12
+    f[13] -= wy * (L**2) / 12
 
     f[2] += wz * L / 2
-    f[9] += wz * L / 2
+    f[10] += wz * L / 2
     f[4] -= wz * (L**2) / 12
-    f[11] += wz * (L**2) / 12
+    f[12] += wz * (L**2) / 12
 
     return f
 
@@ -269,7 +268,7 @@ def assemble_linear_system(
     node_ids = collect_active_nodes(model)
     node_index = {nid: idx for idx, nid in enumerate(node_ids)}
 
-    ndof = 7 * len(node_ids)
+    ndof = 8 * len(node_ids)
     K = np.zeros((ndof, ndof), dtype=float)
     F = np.zeros(ndof, dtype=float)
 
@@ -358,8 +357,8 @@ def assemble_linear_system(
 
         dofs = []
         for nid in (n1, n2):
-            base = 7 * node_index[nid]
-            dofs.extend([base + j for j in range(7)])
+            base = 8 * node_index[nid]
+            dofs.extend([base + j for j in range(8)])
         dofs_arr = np.array(dofs, dtype=int)
 
         for a in range(14):
@@ -394,7 +393,6 @@ def assemble_linear_system(
                 f_local = _udl_equiv_nodal_local(wx=q_local[0], wy=q_local[1], wz=q_local[2], L=L)
                 f_global = T.T @ f_local
                 F[dofs_arr] += f_global
-
         # initial strain: thermal + extra (creep)
         eps0 = 0.0
         if model.uniform_temperature is not None and alp_eff is not None and mat.reft is not None:
@@ -408,26 +406,22 @@ def assemble_linear_system(
             ky0, kz0 = extra_initial_curvature_by_elem.get(e.id, (0.0, 0.0))
 
         if abs(eps0) > 0 or abs(ky0) > 0 or abs(kz0) > 0:
-            f0_local = np.zeros(14, dtype=float)
+            f0_local = np.zeros(16, dtype=float)
             
             if abs(eps0) > 0:
                 N0 = E * A * eps0
                 f0_local[0] -= N0
-                f0_local[7] += N0
+                f0_local[8] += N0
             
             if abs(ky0) > 0:
                 My0 = E * Iy * ky0
-                # Bending about local y (affects rotation about y)
-                # Equivalent nodal moments: -My0 at node 1, +My0 at node 2
                 f0_local[4] -= My0
-                f0_local[11] += My0
+                f0_local[12] += My0
 
             if abs(kz0) > 0:
                 Mz0 = E * Iz * kz0
-                # Bending about local z (affects rotation about z)
-                # Equivalent nodal moments: -Mz0 at node 1, +Mz0 at node 2
                 f0_local[5] -= Mz0
-                f0_local[12] += Mz0
+                f0_local[13] += Mz0
 
             f0_global = T.T @ f0_local
             F[dofs_arr] += f0_global
@@ -480,89 +474,16 @@ def assemble_linear_system(
             F[base + 1] += fvec[1]
             F[base + 2] += fvec[2]
 
-        # Distributed load due to curvature (replacing corner resultant)
-        # This converts internal pressure acting on curved pipe into equivalent
-        # distributed loads on the beam elements.
-        
-        # Map edges to elements for pressure lookup
-        edge_to_elem = {}
-        for e in model.elements.values():
-            edge = tuple(sorted((e.n1, e.n2)))
-            edge_to_elem[edge] = e.id
+        # curved pressure loads are handled per element in the main loop; node-based curvature loads removed to avoid double counting
 
-        # Default pressure if specific element pressure is missing
-        p_default = 0.0
-        if model.elem_pressures:
-            p_default = float(sum(ep.value for ep in model.elem_pressures) / len(model.elem_pressures))
+    # lock warp DOF lightly to avoid singularity (treated as near-fixed)
+    warp_lock = E * A * 1e6
+    for nid in node_ids:
+        idx = 8 * node_index[nid] + dof_map.get("WARP", 7)
+        K[idx, idx] += warp_lock
 
-        # Calculate distributed load vector q at each internal node
-        node_q = {}  # nid -> np.array([qx, qy, qz])
-        
-        for nid in node_ids:
-            neigh = adj.get(nid, [])
-            if len(neigh) != 2:
-                continue
-
-            n1_id, n2_id = neigh
-            p0 = np.array([model.nodes[nid].x, model.nodes[nid].y, model.nodes[nid].z], dtype=float)
-            p1 = np.array([model.nodes[n1_id].x, model.nodes[n1_id].y, model.nodes[n1_id].z], dtype=float)
-            p2 = np.array([model.nodes[n2_id].x, model.nodes[n2_id].y, model.nodes[n2_id].z], dtype=float)
-
-            v1 = p1 - p0
-            v2 = p2 - p0
-            l1 = float(np.linalg.norm(v1))
-            l2 = float(np.linalg.norm(v2))
-
-            if l1 <= 1e-9 or l2 <= 1e-9:
-                continue
-
-            t1 = v1 / l1
-            t2 = v2 / l2
-
-            # If nearly colinear, curvature is zero
-            if abs(np.dot(t1, t2)) > 0.9999:
-                continue
-
-            # Pressure magnitude
-            e1_id = edge_to_elem.get(tuple(sorted((nid, n1_id))))
-            e2_id = edge_to_elem.get(tuple(sorted((nid, n2_id))))
-            
-            val1 = p_by_elem.get(e1_id, p_default) if e1_id is not None else p_default
-            val2 = p_by_elem.get(e2_id, p_default) if e2_id is not None else p_default
-            p_local = (val1 + val2) / 2.0
-
-            # Force direction and magnitude
-            # Net force at node F = P * Ai * (-t1 - t2)
-            # Distributed load q = F / L_tributary
-            # L_tributary = (l1 + l2) / 2
-            
-            f_node = p_local * ai * (-t1 - t2)
-            node_q[nid] = f_node / (0.5 * (l1 + l2))
-
-        # Apply distributed loads to elements
-        for info in elem_infos:
-            q1 = node_curvature_force_val = node_q.get(info.n1, np.zeros(3))
-            q2 = node_curvature_force_val = node_q.get(info.n2, np.zeros(3))
-
-            if np.linalg.norm(q1) < 1e-12 and np.linalg.norm(q2) < 1e-12:
-                continue
-
-            # Average distributed load on element
-            q_global = 0.5 * (q1 + q2)
-            
-            # Transform to local coordinates
-            # info.R is 3x3 rotation matrix (columns are local axes in global coords)
-            # q_local = R^T * q_global
-            q_local = info.R.T @ q_global
-            
-            # q_local[0] is axial (x), q_local[1] is y, q_local[2] is z
-            # We apply transverse loads and axial loads
-            f_equiv_local = _udl_equiv_nodal_local(wx=q_local[0], wy=q_local[1], wz=q_local[2], L=info.L)
-            
-            # Transform forces back to global
-            f_equiv_global = info.T.T @ f_equiv_local
-            
-            # Add to global force vector
-            F[info.dofs] += f_equiv_global
+    # Small regularization to avoid singularities from unused DOFs
+    reg = E * A * 1e-12
+    K += np.eye(ndof) * reg
 
     return node_ids, node_index, K, F, elem_infos, dof_map, (E, A, float(model.uniform_temperature or 0.0))

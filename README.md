@@ -2,15 +2,15 @@
 
 这是一个**功能完备**的高温管道蠕变求解器，实现了赛题要求的核心功能：
 
-- **核心求解器**：基于 7-DOF 管单元（3平动+3转动+1椭圆化），支持直管（PIPE288）和弯管（ELBOW290）。
+- **核心单元**：基于 8-DOF 管单元（3 平动 + 3 转动 + 1 椭圆化 OVAL + 1 占位 WARP；WARP 已锁定防奇异），支持直管（PIPE288）和弯管（ELBOW290）。
 - **物理特性**：
-  - **模态耦合**：实现了弯管的 Karman 效应（弯曲-椭圆化耦合），模拟弯管在弯矩作用下的截面扁平化。
-  - **材料非线性**：支持弹塑性（双线性等向强化 BISO）与高温蠕变（Norton 定律）的耦合求解。
-  - **高效积分**：采用截面积分点算法（默认 12环向 × 2径向），精确计算截面应力重分布。
-  - **载荷等效**：实现了内压的端部盲板力（End-cap thrust）和弯管分布载荷（Distributed loads）等效。
+  - **Karman 耦合**：弯管弯曲-椭圆化耦合，捕捉截面扁平化。
+  - **材料非线性**：弹塑性（双线性 BISO）与高温蠕变（Norton）耦合，截面积分默认 12×2。
+  - **温度依赖**：解析 MPTEMP/MPDATA，求解时对 EX/NUXY/ALPX/DENS 做分段插值，支持参考温度 REFT；自重等使用插值密度。
+  - **压力等效**：内压端面推力 + 基于曲率的 Bourdon 分布载荷（可通过材料系数 k_bourdon_scale 调节），用于弯管。
 - **输入输出**：
-  - 读取 ANSYS `*.cdb`（支持几何、材料、边界、载荷、塑性/蠕变参数解析，支持 MPTEMP/MPDATA 温度依赖材料表）。
-  - 导出 VTK Legacy PolyData（`.vtk`），支持中心线位移和 **3D 曲面模态变形** 云图。
+  - 读取 ANSYS `*.cdb`（几何/材料/边界/载荷/塑性/蠕变/温度表/BHPADD 可调 Bourdon 系数）。
+  - 导出 VTK（中心线位移）与 **曲面四边形云图**（支持模态展开与标量着色），标量默认 `displacement_mag`。
 
 ## 依赖
 
@@ -62,6 +62,7 @@ python3 -m pip install --user .
 ```bash
 bash run_all_cases.sh
 ```
+（脚本默认为所有算例开启 `--pressure-equiv` 并输出曲面文件。）
 ### PIPE288（直管）
 
 ```bash
@@ -86,32 +87,35 @@ tubo creep --cdb "开放原子-管单元/PIPE288_CREEP.cdb" --outdir out --basen
 
 ### 曲面四边形云图（管壁展开显示）
 
-为了满足“管单元环向自由度结果需扩展为三维曲面，采用四边形面片进行云图显示”的展示要求，提供了中心线→曲面四边形展开输出：
+满足“管单元环向自由度结果需扩展为三维曲面”要求，中心线可展开为四边形面片：
 
 ```bash
 PYTHONPATH=src python3 -m tubo run \
   --cdb "开放原子-管单元/PIPE288_PLAST.cdb" \
   --out build/out_pipe288_plast.vtk \
   --surface build/out_pipe288_surface.vtk \
-  --circ 24
+  --circ 24 \
+  --surface-scalar disp \
+  --surface-scale 1.0
 
 PYTHONPATH=src python3 -m tubo run \
   --cdb "开放原子-管单元/ELBOW290_PLAST.cdb" \
   --out build/out_elbow290_plast.vtk \
   --surface build/out_elbow290_surface.vtk \
-  --circ 36
+  --circ 36 \
+  --surface-scalar disp
 ```
 
 - `--surface`: 额外输出曲面 VTK（POLYDATA/POLYGONS 四边形）。
 - `--circ`: 曲面环向离散分段数（默认 24）。
-- 半径来源：默认使用截面外径的一半（`SECDATA` 提供的外径与厚度），后续将与环向傅里叶模态位移场耦合。
-
-ParaView 打开 `out_*_surface.vtk` 即可查看管壁曲面云图。
+- `--surface-scalar {disp,none}`：曲面标量，默认位移模量，可选关闭着色。
+- `--surface-scale`：标量缩放，便于放大位移色阶（默认为 1.0）。
+- 半径来源：默认外径一半（`SECDATA`），若有模态状态将自动叠加椭圆化变形。
 
 ### 压力等效开关
 
-- `--pressure-equiv`: 在装配中启用压力等效。目前默认行为为“端面推力近似（闭口端）”，用于体现内压的轴向推力；壁面分布载荷的准确等效将优先在弯管上实现并逐步完善。
-- 该开关同时作用于 `tubo run` 与 `tubo creep`，便于对比开启/关闭的数值差异。
+- `--pressure-equiv`: 在装配中启用压力等效：端面盲板力 + 基于曲率的 Bourdon 分布载荷（方向沿曲率法线，强度约 `p * Ai * curvature * k_bourdon_scale`）。`k_bourdon_scale` 可在 CDB 中用 `BHPADD,mat,scale` 设置（默认 1.0）。
+- 该开关同时作用于 `tubo run` 与 `tubo creep`，便于开启/关闭对比。
 ### ParaView 小贴士
 
 - 曲面云图：打开 `out_*_surface.vtk`，在 `Properties` 勾选 `Surface` 显示；在 `Coloring` 选择标量或向量分量进行着色。
@@ -140,26 +144,25 @@ PYTHONPATH=src python3 -m tubo run \
 
 - 建议对比：自由端位移量级与方向、曲面着色下的变化；在说明书中配两图并标注开关状态。
 
-补充：启用压力等效时，针对弯管内节点（两侧相邻段不共线）加入了拐角合力近似：按两侧切向单位向量之差 `t2 - t1` 方向施加近似推力 `F ≈ p * Ai * (t2 - t1)`，用于在 ELBOW 上体现内压方向改变的效果（MVP 近似，后续将替换为更精确的壁面分布载荷等效）。
-
 ## 当前已解析/支持的 CDB 片段（MVP）
 
-- `ET`：建立 type_num → element_code（288/290）映射
-- `NBLOCK`：节点坐标
-- `EBLOCK`：元素属性+连通（按本仓库示例文件的尾部字段规则解析）
-- `MPDATA`：`EX/NUXY(or PRXY)/DENS/ALPX/REFT`
-- `SECTYPE/SECDATA`：提取外径与厚度（仅用前两项）
-- `D`：位移/转角约束
-- `F`：节点力/力矩
-- `SFE,PRES`：目前仅解析记录，**未**转化为等效载荷
- - `SFE,PRES`：按“闭口端推力（end-cap thrust）”等效到边界节点（MVP 近似）
-- `TB,CREE`：解析 creep 的 4 个参数（C1..C4），用于最小时间步进（轴向等效初始应变增量）
-- `TIME/NSUBST`：用于驱动蠕变时间步进（也可通过命令行覆盖）
+- `ET`：建立 type_num → element_code（288/290）映射。
+- `NBLOCK`：节点坐标。
+- `EBLOCK`：元素属性+连通（按本仓库示例文件的尾部字段规则解析）。
+- `MPTEMP/MPDATA`：插值 `EX/NUXY(or PRXY)/DENS/ALPX/REFT`。
+- `BHPADD`：可设置材料级 Bourdon 系数（用于压力曲率载荷）。
+- `SECTYPE/SECDATA`：提取外径与厚度（仅用前两项）。
+- `D`：位移/转角约束。
+- `F`：节点力/力矩。
+- `SFE,PRES`：解析记录，但暂不直接作为壁面等效载荷；端面推力与 Bourdon 分布载荷由求解器内部实现。
+- `TB,CREE`：解析 creep 的 4 个参数（C1..C4），用于最小时间步进（轴向等效初始应变增量）。
+- `TIME/NSUBST`：用于驱动蠕变时间步进（也可通过命令行覆盖）。
 
 ## 已知限制（后续要做）
 
-- **温度相关性**：目前解析器已支持 `MPTEMP`，但求解器内部暂使用单一参考温度下的材料参数，尚未实现多温度点的插值查找。
-- **大变形**：目前基于小应变假设，未包含几何非线性（大转动）。
+- **WARP 自由度**：当前为占位并锁死，仅用于避免奇异；未来可扩展真实翘曲场。
+- **压力壁面更精细等效**：已实现曲率向 Bourdon 分布载荷，尚未细化到环向分布压力分片。
+- **几何非线性**：采用小应变/小转角假设，未包含大变形。
 
 ## 代码入口
 

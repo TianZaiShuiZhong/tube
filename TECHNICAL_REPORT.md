@@ -2,16 +2,16 @@
 
 ## 1. 引言 (Introduction)
 
-本项目的目标是开发一套高效的有限元求解器，专门用于模拟高温高压环境下管道系统（直管与弯管）的力学行为，特别是蠕变（Creep）和塑性（Plasticity）效应。为了在保证精度的同时显著提升计算效率，本项目采用了**基于傅里叶模态扩展的管单元（Pipe Element）**理论，而非传统的实体或壳单元。该方法通过在梁单元的基础上引入截面变形自由度（如椭圆化），能够以一维单元的计算代价捕捉三维复杂的变形模式，对标 ANSYS ELBOW290/PIPE288 单元。
+本项目的目标是开发一套高效的有限元求解器，专门用于模拟高温高压环境下管道系统（直管与弯管）的力学行为，特别是蠕变（Creep）和塑性（Plasticity）效应。为了在保证精度的同时显著提升计算效率，本项目采用了**基于傅里叶模态扩展的管单元（Pipe Element）**理论，而非传统的实体或壳单元。该方法通过在梁单元的基础上引入截面变形自由度（如椭圆化），能够以一维单元的计算代价捕捉三维复杂的变形模式，对标 ANSYS ELBOW290/PIPE288 单元；并保留了一个占位的翘曲自由度用于防止数值奇异。
 
 ## 2. 理论基础 (Theoretical Basis)
 
-### 2.1 7自由度管单元模型 (7-DOF Pipe Element)
+### 2.1 8 自由度管单元模型 (8-DOF Pipe Element)
 
-传统的欧拉-伯努利（Euler-Bernoulli）梁单元每个节点具有 6 个自由度（3 个平动 $u_x, u_y, u_z$ 和 3 个转动 $\theta_x, \theta_y, \theta_z$）。为了模拟薄壁管在弯曲载荷下的截面扁平化（Ovalization），我们引入了第 7 个自由度：**椭圆化幅值 (Ovalization Amplitude, $a$)**。
+传统的欧拉-伯努利（Euler-Bernoulli）梁单元每个节点具有 6 个自由度（3 个平动 $u_x, u_y, u_z$ 和 3 个转动 $\theta_x, \theta_y, \theta_z$）。为了模拟薄壁管在弯曲载荷下的截面扁平化（Ovalization），我们引入了椭圆化幅值 $a$；同时保留了一个翘曲占位自由度 $w$，其刚度被大惩罚项锁定，避免矩阵奇异并为后续真实翘曲扩展留接口。
 
 节点自由度向量定义为：
-$$ \mathbf{d} = [u_x, u_y, u_z, \theta_x, \theta_y, \theta_z, a]^T $$
+$$ \mathbf{d} = [u_x, u_y, u_z, \theta_x, \theta_y, \theta_z, a, w]^T $$
 
 ### 2.2 环向傅里叶模态 (Circumferential Fourier Modes)
 
@@ -33,16 +33,22 @@ $$ U_{couple} = - \int_0^L E I \left( \frac{3}{2 R_{curv}} \right) \kappa_z(x) a
 
 ### 2.4 压力载荷等效 (Pressure Load Equivalence)
 
-为了在梁单元上正确模拟内压 $P$ 的作用，我们实现了两类等效载荷：
+在梁单元上正确模拟内压 $P$，实现了两类等效载荷：
 
-1.  **端部盲板力 (End-cap Thrust)**：
-    $$ F_{axial} = P \cdot \pi r_i^2 $$
-    沿管道轴向施加，模拟闭口端承受的压力。
+1. **端部盲板力 (End-cap Thrust)**：
+   $$ F_{axial} = P \cdot \pi r_i^2 $$
+   沿管道轴向施加，模拟闭口端承受的压力。
 
-2.  **弯管分布载荷 (Distributed Curvature Load)**：
-    在弯管处，内压会在管壁产生合力，试图将弯管“拉直”（Bourdon 效应）。等效分布力 $\mathbf{q}$ 为：
-    $$ \mathbf{q} = P \cdot (\pi r_i^2) \cdot \vec{\kappa} $$
-    其中 $\vec{\kappa}$ 是中心线的曲率矢量。该载荷被转化为单元节点的等效剪力。
+2. **弯管 Bourdon 分布载荷 (Curvature Load)**：
+   内压试图“拉直”弯管。以曲率 $\kappa$ 的法向方向施加分布力：
+   $$ \mathbf{q} = -\,k_{\text{bourdon}} \, P \, A_i \, \kappa \, \mathbf{n}_\kappa $$
+   其中 $A_i=\pi r_i^2$，$\mathbf{n}_\kappa$ 为曲率方向，$k_{\text{bourdon}}$ 可通过 CDB 的 `BHPADD,mat,scale` 配置。
+
+壁面分布压力尚未细化成环向分片，当前实现聚焦于弯管的曲率效应。
+
+### 2.5 温度依赖材料插值 (Temperature-Dependent Properties)
+
+解析 `MPTEMP/MPDATA` 表，对弹性模量 $E$、泊松比 $\nu$、线膨胀系数 $\alpha$ 与密度 $\rho$ 做分段线性插值；参考温度 `REFT` 参与热应变扣除。自重和压力等效使用插值后的有效密度，热应变按 $\alpha (T-T_{\text{ref}})$ 施加。
 
 ## 3. 数值算法实现 (Numerical Implementation)
 
@@ -84,7 +90,7 @@ $$ U_{couple} = - \int_0^L E I \left( \frac{3}{2 R_{curv}} \right) \kappa_z(x) a
 
 *   `src/tubo/cdb/parser.py`: **解析层**。读取 ANSYS CDB 文件，构建几何拓扑和材料模型。
 *   `src/tubo/model.py`: **数据层**。定义节点、单元、材料、模态配置等数据类 (Dataclasses)。
-*   `src/tubo/solver/assembly.py`: **线性求解层**。负责 14x14 刚度矩阵组装、坐标变换、Karman 耦合项计算。
+*   `src/tubo/solver/assembly.py`: **线性求解层**。负责 16x16 刚度矩阵组装、坐标变换、Karman 耦合项计算、温度插值与压力等效。
 *   `src/tubo/solver/creep.py`: **非线性求解层**。管理时间步进循环、积分点状态更新、本构模型计算。
 *   `src/tubo/vtk/`: **可视化层**。
     *   `writer.py`: 输出中心线结果。

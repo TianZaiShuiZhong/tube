@@ -21,6 +21,18 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--surface", type=Path, default=None, help="Optional quad surface VTK output (.vtk)")
     run.add_argument("--circ", type=int, default=24, help="Circumferential divisions for surface quads")
     run.add_argument("--pressure-equiv", action="store_true", help="Enable pressure equivalence in assembly")
+    run.add_argument(
+        "--surface-scalar",
+        choices=["disp", "none"],
+        default="disp",
+        help="Surface scalar: displacement magnitude or none",
+    )
+    run.add_argument(
+        "--surface-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor applied to surface scalar values",
+    )
 
     creep = sub.add_parser("creep", help="Run a minimal creep time series and export a .pvd")
     creep.add_argument("--cdb", type=Path, required=True, help="ANSYS CDB input file")
@@ -47,9 +59,34 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 radius = 1.0
             centerline = result["node_ids"].tolist()
-            # Pass modal_state if available (currently None for linear_static)
+            emit_scalar = args.surface_scalar != "none"
+            scalar_map = None
+            if emit_scalar:
+                # displacement magnitude as scalar
+                nodal_disp: dict[int, float] = {}
+                disp = result.get("U")
+                if disp is not None:
+                    dof_per_node = len(disp) // len(centerline)
+                    for idx, nid in enumerate(centerline):
+                        seg = disp[dof_per_node * idx : dof_per_node * (idx + 1)]
+                        if len(seg) >= 3:
+                            mag = float(seg[0]) ** 2 + float(seg[1]) ** 2 + float(seg[2]) ** 2
+                            nodal_disp[nid] = (mag ** 0.5) * float(args.surface_scale)
+                if nodal_disp:
+                    scalar_map = nodal_disp
+            # Pass modal_state if available
             modal_state = model.modal_state
-            write_pipe_surface_quads(args.surface, model, centerline, radius=radius, n_circ=int(args.circ), modal_state=modal_state)
+            write_pipe_surface_quads(
+                args.surface,
+                model,
+                centerline,
+                radius=radius,
+                n_circ=int(args.circ),
+                modal_state=modal_state,
+                scalar_map=scalar_map,
+                scalar_name="displacement_mag",
+                emit_scalar=emit_scalar,
+            )
         return 0
 
     if args.cmd == "creep":

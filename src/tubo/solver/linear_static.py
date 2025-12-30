@@ -164,6 +164,10 @@ def solve_linear_static(model: Model, enable_pressure_equiv: bool = True) -> dic
         if bc.dof not in dof_map:
             continue
         fixed[dof_per_node * node_index[bc.node] + dof_map[bc.dof]] = bc.value
+    # lock warp DOF to zero (currently no DOF name in constraints)
+    if "WARP" in dof_map:
+        for nid, idx in node_index.items():
+            fixed[dof_per_node * idx + dof_map["WARP"]] = 0.0
 
     free_dofs = np.array([i for i in range(ndof) if i not in fixed], dtype=int)
     fixed_dofs = np.array(sorted(fixed.keys()), dtype=int)

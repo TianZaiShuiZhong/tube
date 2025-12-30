@@ -39,9 +39,6 @@ def _orthonormal(d: tuple[float, float, float]):
     return u, v
 
 
-    return u, v
-
-
 def _extract_paths(model: Model) -> list[list[int]]:
     """Decompose the model into a list of connected node paths (polylines)."""
     adj: dict[int, list[int]] = {}
@@ -130,6 +127,9 @@ def write_pipe_surface_quads(
     radius: float,
     n_circ: int = 24,
     modal_state: FourierModalState | None = None,
+    scalar_map: dict[int, float] | None = None,
+    scalar_name: str = "scalar",
+    emit_scalar: bool = True,
 ):
     """Write pipe surface with optional modal displacement field for visualization."""
     # Import here to avoid circular import
@@ -141,21 +141,83 @@ def write_pipe_surface_quads(
     all_pts = []
     all_quads = []
     all_modal_radii = []
+    any_modal = False
     
     for p_nodes in paths:
         if len(p_nodes) < 2:
             continue
             
+        use_modal = modal_state is not None and modal_state.modal_amplitudes
+        if use_modal:
+            any_modal = True
         # Generate surface for this path segment
-        if modal_state is not None and modal_state.modal_amplitudes:
+        if use_modal:
             pts, quads, modal_radii = expand_surface_with_modal(
                 model, p_nodes, radius, n_circ, modal_state
             )
+            # Override scalar field if provided to color by another quantity
+            if scalar_map is not None:
+                # replicate scalar per ring per circumferential division using same smoothing as modal expansion
+                centers_raw = [model.nodes[nid] for nid in p_nodes]
+                centers: list = []
+                node_ids: list[int] = []
+                tol = 1e-9
+                for nid, nd in zip(p_nodes, centers_raw):
+                    if not centers:
+                        centers.append(nd)
+                        node_ids.append(nid)
+                        continue
+                    prev = centers[-1]
+                    if abs(prev.x - nd.x) < tol and abs(prev.y - nd.y) < tol and abs(prev.z - nd.z) < tol:
+                        continue
+                    centers.append(nd)
+                    node_ids.append(nid)
+                smoothed: list = []
+                smoothed_ids: list[int] = []
+                if centers:
+                    smoothed.append(centers[0])
+                    smoothed_ids.append(node_ids[0])
+                for i in range(1, len(centers) - 1):
+                    c_prev, c_cur, c_next = centers[i - 1], centers[i], centers[i + 1]
+                    id_cur = node_ids[i]
+                    p_prev = (c_prev.x, c_prev.y, c_prev.z)
+                    p_cur = (c_cur.x, c_cur.y, c_cur.z)
+                    p_next = (c_next.x, c_next.y, c_next.z)
+                    d_prev = _safe_dir(p_prev, p_cur)
+                    d_next = _safe_dir(p_cur, p_next)
+                    dot = max(-1.0, min(1.0, d_prev[0] * d_next[0] + d_prev[1] * d_next[1] + d_prev[2] * d_next[2]))
+                    angle = math.acos(dot)
+                    len_prev = math.sqrt((p_cur[0] - p_prev[0]) ** 2 + (p_cur[1] - p_prev[1]) ** 2 + (p_cur[2] - p_prev[2]) ** 2)
+                    len_next = math.sqrt((p_next[0] - p_cur[0]) ** 2 + (p_next[1] - p_cur[1]) ** 2 + (p_next[2] - p_cur[2]) ** 2)
+                    smooth_len = min(0.5 * min(len_prev, len_next), radius)
+                    if angle > 1e-3 and smooth_len > 0:
+                        smoothed.append(Node(id=id_cur, x=c_cur.x - d_prev[0] * smooth_len, y=c_cur.y - d_prev[1] * smooth_len, z=c_cur.z - d_prev[2] * smooth_len))
+                        smoothed_ids.append(id_cur)
+                        smoothed.append(c_cur)
+                        smoothed_ids.append(id_cur)
+                        smoothed.append(Node(id=id_cur, x=c_cur.x + d_next[0] * smooth_len, y=c_cur.y + d_next[1] * smooth_len, z=c_cur.z + d_next[2] * smooth_len))
+                        smoothed_ids.append(id_cur)
+                    else:
+                        smoothed.append(c_cur)
+                        smoothed_ids.append(id_cur)
+                if len(centers) > 1:
+                    smoothed.append(centers[-1])
+                    smoothed_ids.append(node_ids[-1])
+                modal_radii = []
+                for nid in smoothed_ids:
+                    val = float(scalar_map.get(nid, 0.0))
+                    modal_radii.extend([val] * n_circ)
+            # Safety: align scalar length with points
+            if len(modal_radii) != len(pts):
+                if scalar_map is not None:
+                    modal_radii = [float(scalar_map.get(p_nodes[0], 0.0))] * len(pts)
+                else:
+                    modal_radii = [0.0] * len(pts)
         else:
             # Original simple expansion (no modal)
             pts = []
             quads = []
-            modal_radii = []
+            modal_radii = [] if emit_scalar else None
             ring_centers = []
             
             # Build center coordinates, removing consecutive duplicates (zero-length segments)
@@ -310,7 +372,11 @@ def write_pipe_surface_quads(
                     py = c.y + r * (math.cos(theta) * u[1] + math.sin(theta) * v[1])
                     pz = c.z + r * (math.cos(theta) * u[2] + math.sin(theta) * v[2])
                     pts.append((px, py, pz))
-                    modal_radii.append(0.0)
+                    val = 0.0
+                    if scalar_map is not None:
+                        val = float(scalar_map.get(c.id, 0.0))
+                    if emit_scalar:
+                        modal_radii.append(val)
             
             for i in range(len(centers) - 1):
                 r0 = ring_offset[i]
@@ -345,7 +411,13 @@ def write_pipe_surface_quads(
         # Merge into global list
         base_idx = len(all_pts)
         all_pts.extend(pts)
-        all_modal_radii.extend(modal_radii)
+        if emit_scalar:
+            if modal_radii is None:
+                modal_radii = [0.0] * len(pts)
+            # pad scalar length if mismatched
+            if len(modal_radii) != len(pts):
+                modal_radii = [0.0] * len(pts)
+            all_modal_radii.extend(modal_radii)
         for (a, b, c, d) in quads:
             all_quads.append((a + base_idx, b + base_idx, c + base_idx, d + base_idx))
     
@@ -364,10 +436,11 @@ def write_pipe_surface_quads(
         for a, b, c, d in all_quads:
             f.write(f"4 {a} {b} {c} {d}\n")
         
-        # Write modal radial component as scalar for visualization
-        if all_modal_radii:
+        # Write scalar component for visualization
+        if emit_scalar and all_modal_radii:
             f.write(f"POINT_DATA {len(all_pts)}\n")
-            f.write("SCALARS modal_radial_disp float 1\n")
+            fname = "modal_radial_disp" if any_modal and scalar_map is None else scalar_name
+            f.write(f"SCALARS {fname} float 1\n")
             f.write("LOOKUP_TABLE default\n")
             for val in all_modal_radii:
                 f.write(f"{val:.9g}\n")

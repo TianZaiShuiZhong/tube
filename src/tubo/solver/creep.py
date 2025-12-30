@@ -110,6 +110,10 @@ def solve_creep_time_series(model: Model, *, time_end: float, nsubsteps: int, en
             if bc.dof not in dof_map:
                 continue
             fixed[dof_per_node * node_index[bc.node] + dof_map[bc.dof]] = bc.value
+        # lock warp DOF to zero (placeholder)
+        if "WARP" in dof_map:
+            for nid, idx in node_index.items():
+                fixed[dof_per_node * idx + dof_map["WARP"]] = 0.0
 
         free_dofs = np.array([i for i in range(ndof) if i not in fixed], dtype=int)
         fixed_dofs = np.array(sorted(fixed.keys()), dtype=int)
