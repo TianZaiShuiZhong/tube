@@ -1,113 +1,231 @@
 # 详细技术说明书与代码实现文档
 
-## 1. 项目概述 (Project Overview)
+## 1. 项目概述
 
-本项目实现了一套**基于管单元的高温管道蠕变高效求解器**。针对高温高压管道（如火电厂主蒸汽管道）的蠕变分析需求，传统实体单元建模计算量大、效率低，而普通梁单元无法捕捉弯管截面变形（椭圆化）及刚度折减效应。
+本项目实现了一套面向高温高压管道的高效有限元求解器，核心目标是在保持计算效率的同时，准确捕捉弯管截面椭圆化、Karman 耦合、弹塑性与高温蠕变等关键物理。通过 8 自由度管单元（含椭圆化 OVAL 与占位 WARP）和截面积分算法，能用一维单元的自由度数量获得接近实体/壳单元的精度。
 
-本软件采用**7自由度管单元理论**，通过引入截面变形模态，在保持一维单元计算效率的同时，实现了接近三维实体单元的计算精度。
+### 应用价值
+- **高效**：相对 3D 实体/壳模型，自由度数量可降 90%+，适合长管网快速迭代。
+- **对接便捷**：直接解析 ANSYS CDB 输入（几何/材料/边界/载荷/温度表/蠕变/塑性），无缝融入现有流程。
+- **物理完整**：支持 Karman 耦合、Bourdon 压力等效、温度插值、自重/压力/端面推力、蠕变与塑性迭代。
 
-### 1.1 应用价值 (Application Value)
-1.  **计算效率提升**：相比 3D 实体单元，自由度数量减少 95% 以上，计算速度提升 1-2 个数量级。
-2.  **工程适用性强**：直接支持工业界通用的 ANSYS CDB 格式，无缝对接现有工程流程。
-3.  **物理机制完备**：能够精确模拟弯管在弯矩作用下的 Karman 效应（刚度降低与截面扁平化），对高温管道的寿命评估至关重要。
-
-### 1.2 创新点 (Innovation Points)
-1.  **基于傅里叶模态的 7-DOF 管单元**：在传统 6 自由度梁单元基础上，引入第 7 自由度（椭圆化幅值 $a$），通过刚度耦合项精确描述弯管力学行为。
-2.  **截面积分点算法 (Fiber/Integration Point Method)**：放弃宏观截面属性（如 $EI$），采用截面离散积分点计算应力，从而精确处理弹塑性（BISO）和非线性蠕变（Norton）的耦合演化。
-3.  **智能拓扑重构可视化**：实现了从 1D 单元拓扑自动重构 3D 管道曲面的算法，支持复杂管网的直观云图展示。
-
----
-
-## 2. 核心算法与代码实现 (Core Algorithms & Implementation)
-
-本节详细说明源代码中各关键模块的算法原理与实现逻辑。
-
-### 2.1 数据模型定义
-**文件**：`src/tubo/model.py`
-
-*   **功能**：定义有限元分析的基础数据结构。
-*   **实现方法**：使用 Python `dataclasses` 定义不可变数据对象。
-    *   `Node`: 节点坐标 $(x, y, z)$。
-    *   `Element`: 单元拓扑，包含节点索引 $(n_1, n_2)$ 及方向节点 $n_3$。
-    *   `Material`: 材料属性，包含弹性 ($E, \nu$)、塑性 (Yield, Tangent)、蠕变参数 ($C_1 \dots C_4$)。
-    *   `FourierModalState`: 存储计算得到的模态幅值，用于后处理。
-
-### 2.2 输入文件解析
-**文件**：`src/tubo/cdb/parser.py`
-
-*   **功能**：解析 ANSYS CDB (Common Database) 格式文件。
-*   **算法说明**：采用**状态机 (State Machine)** 模式逐行读取文本。
-    *   识别 `NBLOCK` 读取节点。
-    *   识别 `EBLOCK` 读取单元连接关系。
-    *   识别 `MP,` / `TB,BISO` / `TB,CREEP` 读取材料非线性参数。
-    *   识别 `D,` / `F,` / `SFBEAM` 读取边界条件与载荷。
-*   **实现细节**：
-    *   支持 `NSUBST` 和 `TIME` 关键字解析，自动配置蠕变分析的时间步长。
-    *   针对 `TB,CREEP` 表格，解析 Norton 模型所需的 $C_1, C_2, C_3, C_4$ 参数。
-
-### 2.3 刚度矩阵组装与 Karman 效应
-**文件**：`src/tubo/solver/assembly.py`
-
-这是线性求解器的核心。
-
-*   **算法说明**：**7-DOF 梁单元刚度矩阵构建**。
-    *   **基础刚度**：基于 Euler-Bernoulli 梁理论构建 $12 \times 12$ 矩阵（拉压、扭转、双向弯曲）。
-    *   **椭圆化刚度 ($k_{oval}$)**：推导圆环在 $m=2$ 模态下的抗弯刚度：
-        $$ k_{oval} = \frac{9 \pi D_{ring}}{R^3} L $$
-        其中 $D_{ring}$ 为管壁板壳弯曲刚度。
-    *   **Karman 耦合 ($K_c$)**：这是**核心创新点**。弯管的弯曲变形 $\theta_z$ 会诱发截面椭圆化 $a$。我们在刚度矩阵中引入非对角耦合项：
-        $$ K_{couple} \propto \frac{E I}{R_{curv}} $$
-        使得弯矩自动产生椭圆化变形，反之亦然。
-
-*   **压力载荷等效**：
-    *   **端部效应**：计算 $P \cdot \pi r^2$ 并施加在管道开口端节点。
-    *   **分布效应**：对于弯管，内压会产生试图拉直弯管的合力（Bourdon 效应）。算法计算单元曲率矢量 $\vec{\kappa}$，将压力转化为分布横向载荷 $\mathbf{q} = P A \vec{\kappa}$ 并等效到节点力。
-
-### 2.4 非线性蠕变求解器
-**文件**：`src/tubo/solver/creep.py`
-
-*   **功能**：执行时间步进分析，求解弹塑性与蠕变。
-*   **算法说明**：**算子分裂法 (Operator Splitting) + 截面积分**。
-    1.  **截面离散**：`_generate_integration_points` 将管截面划分为 $N_{circ} \times N_{rad}$ 个积分点（默认 $12 \times 2$）。
-    2.  **时间积分循环**：
-        *   **Elastic Predictor**：假设当前步为纯弹性，计算试探应力 $\sigma^{trial}$。
-        *   **Plastic Corrector**：使用**径向返回映射 (Radial Return Mapping)** 算法。若 $\sigma^{trial} > \sigma_y$，则将应力拉回屈服面，更新塑性应变 $\epsilon_{pl}$。
-        *   **Creep Update**：基于当前应力，利用 Norton 律 $\dot{\epsilon}_{cr} = C_1 \sigma^{C_2} e^{-C_3/T}$ 计算蠕变应变增量 $\Delta \epsilon_{cr}$。
-    3.  **全局平衡**：将积分点的非弹性应变（塑性+蠕变）积分回截面内力，转化为节点的**等效非线性载荷向量**，在下一时间步施加。
-
-### 2.5 模态扩展与可视化
-**文件**：`src/tubo/solver/modal.py` & `src/tubo/vtk/surface.py`
-
-*   **功能**：将 1D 计算结果转化为 3D 可视化数据。
-*   **算法说明**：
-    *   **模态叠加**：管壁任意一点的径向位移 $w(\theta)$ 由中心线位移和模态幅值叠加而成：
-        $$ w(\theta) = w_{beam} + a \cos(2\theta) $$
-    *   **拓扑重构** (`_extract_paths`)：针对 `PIPEMIX` 等复杂模型，算法自动分析单元连接图（Adjacency Graph），识别出连续的管道路径（Path），处理分支和断点，确保生成的 3D 曲面网格拓扑正确、纹理连续。
+### 创新点
+1) **8-DOF 管单元**：在 6-DOF 梁上加入 OVAL + WARP（锁定防奇异），弯管刚度矩阵含椭圆化耦合。  
+2) **截面积分 + 本构返回映射**：放弃简化截面刚度，采用环向×径向积分点，逐点弹塑/蠕变更新并回收为等效广义应变载荷。  
+3) **曲率驱动压力等效**：端面推力 + 基于曲率的 Bourdon 分布载荷（可通过材料系数调节），针对弯管压力效应。  
+4) **温度表插值**：MPTEMP/MPDATA 对 E/ν/α/ρ 做分段插值，统一驱动热应变、自重和刚度。  
+5) **自动曲面重构**：从 1D 拓扑提取路径，平行运输构造稳定框架，生成四边形管壁曲面，并可叠加模态/标量云图。
 
 ---
 
-## 3. 对标测试与验证 (Benchmarking & Verification)
+## 2. 代码总览与算法角色
 
-项目包含自动化验证脚本 `scripts/verify_physics.py`。
+- `src/tubo/model.py`：数据模型（节点/单元/材料/截面/模态状态），含温度表与 Bourdon 系数。
+- `src/tubo/cdb/parser.py`：CDB 解析器，状态机读 NBLOCK/EBLOCK/MPDATA/MPTEMP/TB 等，生成 Model。
+- `src/tubo/solver/assembly.py`：局部 16×16 刚度、压力等效、温度插值、自重/端力装配，生成全局 K/F。
+- `src/tubo/solver/linear_static.py`：线性静力求解，处理约束、正则化、解算并回填结果。
+- `src/tubo/solver/creep.py`：时间步进，积分点弹塑-蠕变更新，组装等效应变载荷，输出序列。
+- `src/tubo/solver/modal.py`：环向傅里叶模态 m=0/1/2 的位移展开，用于曲面生成和颜色场。
+- `src/tubo/vtk/writer.py`：中心线 VTK 导出。
+- `src/tubo/vtk/surface.py`：曲面四边形生成，支持模态/标量映射与角点平滑。
+- `src/tubo/vtk/pvd.py`：PVD 时间序列文件。
+- `src/tubo/cli.py`：命令行入口，`run`/`creep`，带压力等效和曲面输出选项。
+- `run_all_cases.sh`：一键跑全套算例（含压力等效、曲面）。
+- `scripts/verify_physics.py` / `verify_results_data.py`：物理与回归验证脚本。
 
-### 3.1 弹性与刚度验证
-*   **测试对象**：悬臂直管。
-*   **结果**：有限元解与材料力学理论解误差为 **0.00%**。证明 6-DOF 基础刚度矩阵准确。
+---
 
-### 3.2 Karman 效应验证 (对标 ELBOW290)
-*   **测试对象**：90度弯管受弯矩。
-*   **现象**：求解器计算出明显的截面椭圆化 ($a \neq 0$)，且弯管整体柔度增加。
-*   **结论**：成功复现了 ANSYS ELBOW290 单元的关键特性（刚度折减系数）。
+## 3. 各文件算法与实现要点
 
-### 3.3 蠕变率验证
-*   **测试对象**：恒力拉伸杆。
-*   **结果**：应变增长率严格符合 Norton 公式设定值。证明时间积分算法稳定可靠。
+### 3.1 `model.py`
+- **实体**：Node/Element/Material/SectionPipe/ModalConfig/FourierModalState。  
+- **温度表**：`Material.temp_tables` 保存 MPTEMP/MPDATA；插值时取 E/ν/α/ρ。`k_bourdon_scale` 可调 Bourdon 强度。  
+- **DOF 定义**：`_DOF_ORDER` 含 UX, UY, UZ, RX, RY, RZ, OVAL, WARP；WARP 目前用惩罚锁死。
+- **材料复制**：拷贝时保留塑性/蠕变/温度表/Bourdon 系数，避免多材料分配时丢字段。
 
-### 3.4 综合算例验证
-*   **PIPE288**：验证了轴向与弯曲组合下的蠕变伸长。
-*   **ELBOW290**：验证了高温高压下弯管的复杂变形（鼓胀与变扁）。
-*   **PIPEMIX**：验证了直弯组合系统的整体协调变形。
+### 3.2 `cdb/parser.py`
+- **状态机解析**：按块识别 NBLOCK/EBLOCK/MP/MPTEMP/MPDATA/SECTYPE/SECDATA/D/F/SFE/TB,CREE/TIME/NSUBST/BHPADD。  
+- **几何**：NBLOCK 读节点；EBLOCK 读类型、截面、材料号与连通。  
+- **材料**：支持 EX/NUXY/ALPX/DENS/REFT，MPTEMP+MPDATA 组合为分段表；BHPADD 读取 Bourdon 系数。  
+- **边界载荷**：D/F 约束和集中力；SFE,PRES 记录但壁面等效内部处理。  
+- **塑性/蠕变**：TB,CREE 读 C1..C4；（BISO 留接口）。  
+- **时间控制**：TIME/NSUBST 用于 creep 默认步长，可 CLI 覆盖。
 
-## 4. 总结
+### 3.3 `solver/assembly.py`
+- **几何与曲率**：对 ELBOW 元素用三点定圆 `_circle_from_three`，得中心、曲率、切向/法向/副法向；直段视为零曲率。  
+- **局部刚度 (16×16)**：基于 Euler-Bernoulli 基础刚度扩展到 8 DOF/端；OVAL 刚度和弯曲耦合项体现 Karman；WARP 对角加惩罚锁定。  
+- **温度插值**：`_interp_prop` 在 MPTEMP/MPDATA 表中线性插值 E/ν/α/ρ；热应变按 α·(T-REFT)；自重用插值密度。  
+- **载荷等效**：
+  - 自重：局部坐标分解，等效到节点。
+  - 压力端面推力：`p * Ai` 沿轴向施加。
+  - Bourdon 曲率载荷：`q = -p * Ai * curvature * k_bourdon_scale * R[:,2]`（法向）；装配到节点等效力。
+- **装配流程**：局部到全局旋转，累加 K/F；构建 dof_map、node_ids、elem_infos。
 
-本软件通过精巧的算法设计，在 Python 环境下实现了一个工业级精度的管道专用有限元求解器。代码结构清晰，模块解耦（解析-组装-求解-可视化），不仅完成了赛题的所有要求，也为后续扩展（如引入更多傅里叶模态 $m=3,4$ 或大转动理论）奠定了坚实基础。
+### 3.4 `solver/linear_static.py`
+- **约束处理**：D 约束锁定，WARP 亦锁；K 加微小对角正则防奇异。  
+- **解算**：使用 `np.linalg.solve`（或 lstsq 兜底），输出位移向量 `U`、反力 `R`、node_ids、dof_map。  
+- **压力等效开关**：传递 `enable_pressure_equiv` 控制组装端力/曲率载荷。
+
+### 3.5 `solver/creep.py`
+- **时间步进**：从 TIME/NSUBST（或 CLI 覆盖）生成子步；每步调用组装更新载荷与初始应变。  
+- **截面积分**：默认 12×2 积分点；每点存塑性/蠕变历史。  
+- **本构更新**：弹性预测 → 塑性径向返回 → Norton 蠕变增量 → 更新内力并形成等效初始应变载荷。  
+- **输出**：逐步写 VTK 并在 CLI 汇总为 PVD。
+
+### 3.6 `solver/modal.py`
+- **模态位移计算**：支持 m=0/1/2（呼吸、弯曲样、椭圆）；`compute_modal_displacement_at_angle` 给出指定 θ 的 (u_r,u_θ,u_z)。  
+- **曲面展开**：平行运输构造光滑框架，按 n_circ 生成环点，叠加模态半径，输出点/quad/标量。
+
+### 3.7 `vtk/surface.py`
+- **路径提取**：`_extract_paths` 基于邻接表分解连通路径，支持分支与环。  
+- **角点平滑**：在折点前后插入过渡点（长度 ≤ 半径），避免尖折。  
+- **框架传播**：平行运输避免环向扭转跳变。  
+- **模态与标量**：可传 `modal_state` 扩展几何；`scalar_map`/`emit_scalar` 控制着色，长度安全对齐；`any_modal` 控制标量命名。  
+- **输出**：VTK POLYDATA/POLYGONS，点数据写标量（位移模量或模态径向）。
+
+### 3.8 `vtk/writer.py`
+- **中心线 VTK**：写节点坐标、线单元、点数据向量 `displacement`、可选反力/标量。
+
+### 3.9 `vtk/pvd.py`
+- **时间序列**：输出 PVD，列出 timestep 与对应 VTK 文件。
+
+### 3.10 `cli.py`
+- **子命令**：`run`、`creep`。  
+- **参数**：`--pressure-equiv`、`--surface/--circ/--surface-scalar/--surface-scale`、蠕变的 `--time/--nsubsteps`。  
+- **运行流程**：解析 CDB → 解算 → 写中心线 VTK → 可选曲面 → 蠕变写多步 VTK+PVD。
+
+### 3.11 `run_all_cases.sh`
+- 清理输出，依次运行 PIPE288/ELBOW290/PIPEMIX 的塑性与蠕变算例，统一开启 `--pressure-equiv` 并输出曲面与时间序列。
+
+---
+
+## 4. 算法说明（公式与策略）
+
+- **椭圆化耦合**：局部刚度含弯曲与 OVAL 自由度耦合项，反映 Karman 效应，曲率越大柔化越明显。  
+- **压力等效**：端面推力 + 曲率法向分布力（Bourdon），可用 `k_bourdon_scale` 调节；未细分环向压力片。  
+- **温度插值**：对 E/ν/α/ρ 线性插值，热应变扣除 REFT，自重/压力等效用插值密度，避免温度段跳跃。  
+- **截面积分**：每积分点独立更新塑性/蠕变，累积的初始应变回收为等效节点评价载荷，保证截面应力重分布。  
+- **数值稳健性**：WARP 惩罚锁死；K 加微正则；曲面生成跳过零长度段、角点平滑、标量长度安全对齐。
+
+---
+
+## 5. 对标测试与验证
+
+- **脚本**：`scripts/verify_physics.py`（单元/机制），`scripts/verify_results_data.py`（综合算例），`run_all_cases.sh`（全量回归）。
+- **弹性/刚度**：悬臂直管挠度与梁理论一致（误差≈0）。  
+- **Karman 耦合**：弯管受弯出现非零椭圆化，柔度增加，与 ELBOW290 物理趋势一致。  
+- **蠕变**：恒载蠕变应变率符合 Norton 设定，时间步进稳定。  
+- **压力等效**：开启/关闭 `--pressure-equiv` 对比，弯管位移方向与量级符合端推力+Bourdon 预期。  
+- **VTK 一致性**：曲面点数与标量一致，ParaView 不再报 datasize mismatch；标量默认 `displacement_mag`，模态专用名 `modal_radial_disp`。
+
+---
+
+## 6. 已知限制与待扩展
+
+- WARP 目前仅占位锁死，未实现真实翘曲场/刚度。  
+- 压力壁面更精细等效（环向分片/局部扭转）尚未实现。  
+- 几何非线性未做，大变形/大转动尚不支持。  
+- 模态仅 m=0/1/2，未展开更高阶或真实翘曲模态。  
+- 温度场仅均匀插值，未支持空间分布温度载荷。
+
+---
+
+## 7. 数据流与执行路径
+
+1) **解析阶段**：`cli.py` 调 `parse_cdb` → 产出 Model（节点/单元/材料/截面/约束/载荷/时间）和温度表、Bourdon 系数。  
+2) **组装阶段**：`assemble_linear_system` 读取 Model，按元素构建局部刚度与等效载荷，旋转到全局并累加 K/F，生成 dof_map、node_ids、elem_infos、props。  
+3) **求解阶段**：`linear_static.solve_linear_static` 或 `creep.solve_creep_time_series`：应用约束→解算→组装反力→输出结果字典。  
+4) **后处理**：`writer.write_vtk_polydata` 写中心线；如请求曲面，`surface.write_pipe_surface_quads` 用 centerline 顺序、半径、模态和标量展开；蠕变则 `pvd.write_pvd` 汇总序列。  
+5) **验证/回归**：`run_all_cases.sh` 全量再生输出；`scripts/verify_*` 提供对标与数据检查。
+
+---
+
+## 8. 更详细的算法与实现细节
+
+### 8.1 温度插值与热应变
+- 表格：`MPTEMP` 给温度节点，`MPDATA` 给对应属性；插值采用分段线性：  
+  $$ f(T)=f_i + (f_{i+1}-f_i)\frac{T-T_i}{T_{i+1}-T_i} $$
+- 热应变：$\epsilon_{th} = \alpha(T-T_{ref})$；组装时作为初始应变扣除。  
+- 自重/压力：使用插值后的密度 `dens_eff` 计算体力与端面推力。  
+- 作用范围：静力与蠕变均使用同一插值，确保力学/热一致。
+
+### 8.2 压力等效与 Bourdon 效应
+- 端推力：$F = p \cdot A_i$，沿轴向正方向施加。  
+- Bourdon：曲率 $\kappa$ 来自三点定圆；力密度 $q = -p \cdot A_i \cdot \kappa \cdot k_{bourdon}$，方向为曲率法线。  
+- 参数化：`k_bourdon_scale` 默认 1，可在 CDB 用 `BHPADD,mat,scale` 指定。  
+- 适用：仅对弯段曲率非零的单元；直管不产生 Bourdon。
+
+### 8.3 截面积分与本构
+- 积分点布置：环向均匀 12，径向 2（内/外）；可在代码调整。  
+- 应变恢复：基于平截面假定和 OVAL 模态，得到每点广义应变→局部应力。  
+- 塑性：径向返回，双线性等向硬化（BISO）。  
+- 蠕变：Norton 律，按当前应力计算 $\dot\epsilon_{cr}$，显式时间步积累；步长受 NSUBST/TIME 控制。  
+- 回收：将非弹性应变转为等效初始广义应变/曲率，叠加到右端项。
+
+### 8.4 数值稳健性
+- WARP 惩罚锁死，防止未定义翘曲导致奇异。  
+- K 加微小对角正则；约束时移除对应行列并修正右端。  
+- 曲面生成跳过零长度段，平滑折点，平行运输避免扭转跳变；标量长度检查，避免 VTK datasize mismatch。
+
+### 8.5 可视化与标量字段
+- 中心线 VTK：`displacement` 向量为主字段，反力可选。  
+- 曲面 VTK：默认 `displacement_mag`（可关闭或缩放），若使用模态且未指定标量，则命名 `modal_radial_disp`。  
+- 色阶：在 ParaView 中使用 “Rescale to Data Range”；可在 CLI 用 `--surface-scale` 放大位移色阶。
+
+### 8.6 流程示例（静力 + 曲面）
+```bash
+PYTHONPATH=src python3 -m tubo run \
+  --cdb "开放原子-管单元/ELBOW290_PLAST.cdb" \
+  --out build/out_elbow290.vtk \
+  --surface build/out_elbow290_surface.vtk \
+  --circ 32 \
+  --pressure-equiv \
+  --surface-scalar disp \
+  --surface-scale 5.0
+```
+- 解析 CDB → 装配含 Bourdon 的 K/F → 解算 → 写中心线 VTK → 展开曲面并写位移模量标量。  
+- ParaView 打开曲面，选择 `displacement_mag` 着色并 Rescale。
+
+### 8.7 流程示例（蠕变时间序列）
+```bash
+PYTHONPATH=src python3 -m tubo creep \
+  --cdb "开放原子-管单元/PIPE288_CREEP.cdb" \
+  --outdir build/pipe288_creep \
+  --basename series \
+  --pressure-equiv \
+  --time 100.0 --nsubsteps 20
+```
+- 生成 20 个时间步的 VTK 与 `series.pvd`；ParaView 直接加载 PVD 播放。  
+- 时间/子步可覆盖 CDB 内 TIME/NSUBST。
+
+---
+
+## 9. 对标测试与验证（细化）
+
+- **弹性挠度**：悬臂直管比对 Euler-Bernoulli 理论，误差可忽略。  
+- **Karman 耦合**：弯矩作用下椭圆化幅值非零，柔度增加；可关掉耦合（移除 OVAL 刚度项）作对比。  
+- **压力等效**：开/关 `--pressure-equiv`，观察弯管顶推与轴向端推力；方向与量级符合 Bourdon 预期。  
+- **蠕变**：恒载杆件的应变率与 Norton 设定一致；时间序列位移单调演化无震荡。  
+- **VTK 完整性**：表面点数与标量一致，ParaView 不再提示 “datasize mismatch”。  
+- **脚本化验证**：`bash run_all_cases.sh` 产物可用于回归；`scripts/verify_results_data.py` 读取 VTK 检查最大位移/范围。
+
+---
+
+## 10. 已知限制与扩展路线（再说明）
+
+- **几何非线性**：未引入大转动/大变形；如需，可在局部坐标更新、二阶应变和接触力层面扩展。  
+- **翘曲自由度**：当前锁死，未来可引入薄壁开口截面翘曲刚度或高阶 Fourier 模态。  
+- **压力壁面精细化**：可细化为环向分片压力与局部扭矩等效，提高弯管压力分布精度。  
+- **更高阶模态**：现支持 m=0/1/2，可扩展 m≥3 捕捉更复杂截面畸变。  
+- **非均匀温度场**：目前仅均匀温度输入，未来可支持节点/单元温度载荷或热传导耦合。  
+- **解算器**：当前直接用稠密求解；大模型可切换稀疏求解或迭代预条件以提升性能。
+
+---
+
+## 11. 应用指引（汇总）
+
+- **全量回归**：`bash run_all_cases.sh`（默认开压力等效+曲面）。  
+- **单例静力**：`tubo run --cdb <file> --out <vtk> [--pressure-equiv] [--surface ...] [--surface-scalar disp|none] [--surface-scale k] [--circ n]`。  
+- **蠕变序列**：`tubo creep --cdb <file> --outdir <dir> --basename <name> [--pressure-equiv] [--time T --nsubsteps N]`。  
+- **ParaView 查看**：中心线看 `displacement`；曲面看 `displacement_mag` 或 `modal_radial_disp`，记得 Rescale；需要放大可改 `--surface-scale`。  
+- **验证脚本**：`python3 scripts/verify_physics.py`（机制）；`python3 scripts/verify_results_data.py`（回归数据）。

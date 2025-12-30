@@ -58,11 +58,21 @@ python3 -m pip install --user -U pip
 python3 -m pip install --user .
 ```
 
-## 运行示例
+## 快速开始
+
+1) 安装（见上）。
+2) 运行全部算例并生成中心线 + 曲面 + pvd（默认开启压力等效）：
+
 ```bash
 bash run_all_cases.sh
 ```
-（脚本默认为所有算例开启 `--pressure-equiv` 并输出曲面文件。）
+输出位于 `build/`，包括：
+- `out_pipe288_plast.vtk`、`out_elbow290_plast.vtk`、`out_pipemix_plast.vtk`：中心线结果。
+- 对应的 `_surface.vtk`：四边形曲面结果（带标量）。
+- `pipe288_creep/`、`elbow290_creep/`、`pipemix_creep/`：蠕变时间序列（多步 `.vtk` + `.pvd`）。
+
+3) 单案例（已安装后可直接用 `tubo` 命令；未安装用 `PYTHONPATH=src python3 -m tubo`）。
+
 ### PIPE288（直管）
 
 ```bash
@@ -116,6 +126,20 @@ PYTHONPATH=src python3 -m tubo run \
 
 - `--pressure-equiv`: 在装配中启用压力等效：端面盲板力 + 基于曲率的 Bourdon 分布载荷（方向沿曲率法线，强度约 `p * Ai * curvature * k_bourdon_scale`）。`k_bourdon_scale` 可在 CDB 中用 `BHPADD,mat,scale` 设置（默认 1.0）。
 - 该开关同时作用于 `tubo run` 与 `tubo creep`，便于开启/关闭对比。
+
+### 命令行参数速览
+
+- `--cdb`: 输入 ANSYS CDB。
+- `--out`: 中心线 VTK 输出路径。
+- `--surface` / `--circ` / `--surface-scalar` / `--surface-scale`: 曲面输出与着色控制。
+- `--pressure-equiv`: 开启压力等效。
+- `--outdir` / `--basename` / `--time` / `--nsubsteps`: 蠕变时间序列输出控制。
+
+### 输出文件中常用数据名
+
+- 中心线 `.vtk`：`displacement`（点数据向量），`reaction`（若存在）。
+- 曲面 `.vtk`：`displacement_mag`（默认标量）或 `modal_radial_disp`（仅模态展开且未指定标量时）。
+- `.pvd`：时间序列索引与时间戳，可在 ParaView 直接播放。
 ### ParaView 小贴士
 
 - 曲面云图：打开 `out_*_surface.vtk`，在 `Properties` 勾选 `Surface` 显示；在 `Coloring` 选择标量或向量分量进行着色。
