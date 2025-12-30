@@ -47,7 +47,17 @@ tubo/
 ├── VERIFICATION.md         # 精度验证报告
 ├── DETAILED_DESIGN_DOC.md  # 详细设计文档
 └── README.md               # 项目主文档
+
 ```
+**说明**
+**bash run_all_cases.sh命令生成的build包含：**
+out_elbow290_plast.vtk：只含中心线（POLYLINE/LINE），每个点对应梁/管单元的节点，表现为一条线（用于结构求解结果的轻量表示）。
+
+`out_elbow290_plast_surface.vtk`：含外表面网格（多点/面、三角形/四边形），把截面围起来生成真实的 3D 管道表面，用于可视化和表面应变/位移展示。
+
+build/…_creep 是蠕变时间序列的输出目录。以 build/elbow290_creep 为例，里面有：
+series.pvd：时间序列索引文件，ParaView 打开它即可加载所有时间步。
+series_XXXX.vtk：每个时间步的中心线结果（POLYDATA/LINES），点数据包含 displacement 向量和 node_id 标量。
 
 ## 安装
 
