@@ -69,6 +69,7 @@
 3) VTK 完整性：曲面点数与标量对齐，消除 ParaView “datasize mismatch” 警告。  
 4) WARP 占位锁定：防止未定义翘曲导致奇异。  
 5) 曲面标量：支持 `--surface-scalar/--surface-scale`，可关闭或放大色阶。
+6) 蠕变稳健性：对 Norton 速率加入应力、单步、累计应变限幅，避免时间步过大产生数值溢出。
 
 ---
 

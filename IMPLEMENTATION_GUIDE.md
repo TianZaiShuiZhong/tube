@@ -127,3 +127,4 @@
 - ParaView：中心线看 `displacement`；曲面看 `displacement_mag` 或 `modal_radial_disp`，必要时 Rescale；色阶不足用 `--surface-scale` 放大。  
 - 开发调试：优先跑小算例（PIPE288/ELBOW290），配合 `verify_physics.py` 检查机制。  
 - 提交前：运行 `run_all_cases.sh` 确认无异常警告（尤其 VTK datasize）。
+- 数值稳健性：蠕变求解中对 Norton 速率做应力、单步、累计应变限幅，防止极端步长产生数值溢出。

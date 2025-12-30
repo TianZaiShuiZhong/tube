@@ -23,6 +23,10 @@ def _generate_integration_points(ro: float, ri: float, n_circ: int = 12, n_rad: 
     points = []
     dr = (ro - ri) / n_rad
     d_theta = 2.0 * math.pi / n_circ
+    # Numerical safety阈值
+    stress_cap = 1e6           # 防止 sigma^n 溢出
+    creep_step_cap = 1e-3      # 单步蠕变应变上限
+    creep_total_cap = 1.0      # 单点累计蠕变上限，避免爆炸
     
     for i in range(n_rad):
         r_mid = ri + (i + 0.5) * dr
@@ -80,6 +84,11 @@ def solve_creep_time_series(model: Model, *, time_end: float, nsubsteps: int, en
     for eid in model.elements:
         elem_ips[eid] = [IntegrationPoint(ip.y, ip.z, ip.weight) for ip in ips_template]
         
+    # Numerical safety thresholds to avoid blow-up
+    stress_cap = 1e6           # limit sigma magnitude in Norton power
+    creep_step_cap = 1e-3      # max creep strain increment per step
+    creep_total_cap = 1.0      # max accumulated creep strain per point
+    
     times = np.linspace(0.0, float(time_end), int(nsubsteps))
     dt = np.diff(times, prepend=0.0)
     
@@ -210,12 +219,20 @@ def solve_creep_time_series(model: Model, *, time_end: float, nsubsteps: int, en
                 if dti > 0:
                     # Creep rate based on final stress state
                     # Norton: B * sigma^n
-                    s_val = abs(sigma_final)
+                    s_val = min(abs(sigma_final), stress_cap)
                     s_sign = 1.0 if sigma_final >= 0 else -1.0
                     
                     rate = c1 * (s_val ** c2) * s_sign
+                    if not math.isfinite(rate):
+                        rate = 0.0
                     d_eps_cr = rate * dti
+                    # 单步限幅避免指数爆炸
+                    if abs(d_eps_cr) > creep_step_cap:
+                        d_eps_cr = creep_step_cap * (1.0 if d_eps_cr >= 0 else -1.0)
                     ip.eps_cr += d_eps_cr
+                    # 累计限幅，避免出现极大值
+                    if abs(ip.eps_cr) > creep_total_cap:
+                        ip.eps_cr = creep_total_cap * (1.0 if ip.eps_cr >= 0 else -1.0)
                 
                 # Accumulate total inelastic strain for next step's load vector
                 eps_inelastic = ip.eps_cr + ip.eps_pl
