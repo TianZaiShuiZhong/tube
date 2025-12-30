@@ -81,6 +81,10 @@ class Material:
     reft: float | None = None
     creep: tuple[float, float, float, float] | None = None
     plasticity: tuple[float, float] | None = None  # (yield_strength, tangent_modulus)
+    # Optional temperature-dependent tables: {prop: [(temp, value), ...]}
+    temp_tables: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+    # Bourdon/ovalization scaling (optional), 1.0 means default stiffness
+    k_bourdon_scale: float | None = None
 
 
 @dataclass(frozen=True)

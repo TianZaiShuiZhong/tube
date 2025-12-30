@@ -5,8 +5,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..model import Model
-from .assembly import assemble_linear_system, ElementKinematics
+from ..model import Model, Material
+from .assembly import assemble_linear_system, ElementKinematics, _interp_prop
 
 
 @dataclass
@@ -44,6 +44,10 @@ def solve_creep_time_series(model: Model, *, time_end: float, nsubsteps: int, en
     if not model.materials:
         raise ValueError("No materials")
     mat = model.materials[min(model.materials.keys())]
+    temp_use = model.uniform_temperature if model.uniform_temperature is not None else mat.reft
+    ex_eff = _interp_prop(mat, "EX", temp_use, mat.ex)
+    nu_eff = _interp_prop(mat, "NUXY", temp_use, mat.nuxy)
+    alp_eff = _interp_prop(mat, "ALPX", temp_use, mat.alp)
     
     # Creep parameters (optional)
     c1 = c2 = c3 = c4 = 0.0
@@ -57,8 +61,8 @@ def solve_creep_time_series(model: Model, *, time_end: float, nsubsteps: int, en
 
     # Thermal strain
     eps_thermal = 0.0
-    if model.uniform_temperature is not None and mat.alp is not None and mat.reft is not None:
-        eps_thermal = mat.alp * (model.uniform_temperature - mat.reft)
+    if model.uniform_temperature is not None and alp_eff is not None and mat.reft is not None:
+        eps_thermal = alp_eff * (model.uniform_temperature - mat.reft)
     
     # Section properties
     if not model.sections:

@@ -33,6 +33,7 @@ def parse_cdb(path: Path) -> Model:
 
     # offsets (NUMOFF) exist in these files, but for MVP we keep IDs as-is.
     etype_map: dict[int, int] = {}  # type_num -> element_code (288/290)
+    current_mptemp: list[float] | None = None
 
     i = 0
     next_elem_id = 1
@@ -40,6 +41,17 @@ def parse_cdb(path: Path) -> Model:
     while i < len(text):
         line = text[i].strip()
         if not line or line.startswith("/COM"):
+            i += 1
+            continue
+
+        if line.startswith("MPTEMP"):
+            # MPTEMP, format, ntemp, T1, T2, ...
+            nums = _NUM_RE.findall(line)
+            # temps start from third numeric token onward
+            if len(nums) >= 3:
+                current_mptemp = [float(x) for x in nums[2:]]
+            else:
+                current_mptemp = None
             i += 1
             continue
 
@@ -138,9 +150,21 @@ def parse_cdb(path: Path) -> Model:
                 prop = args[3].strip().upper()
                 mat_id = int(args[4])
                 value = _parse_float(args[6])
+                t_idx = None
+                try:
+                    t_idx = int(args[5])
+                except Exception:
+                    t_idx = None
                 old = model.materials.get(mat_id)
                 if old is None:
                     old = Material(id=mat_id, ex=0.0, nuxy=0.0)
+
+                temp_tables = dict(old.temp_tables)
+                if prop in {"EX", "NUXY", "ALPX", "DENS"} and current_mptemp and t_idx is not None and 0 <= t_idx - 1 < len(current_mptemp):
+                    tval = current_mptemp[t_idx - 1]
+                    arr = temp_tables.get(prop, [])
+                    arr.append((tval, value))
+                    temp_tables[prop] = arr
 
                 if prop in {"EX", "EY", "EZ"}:
                     model.materials[mat_id] = Material(
@@ -151,6 +175,8 @@ def parse_cdb(path: Path) -> Model:
                         alp=old.alp,
                         reft=old.reft,
                         creep=old.creep,
+                        plasticity=old.plasticity,
+                        temp_tables=temp_tables,
                     )
                 elif prop in {"NUXY", "PRXY"}:
                     model.materials[mat_id] = Material(
@@ -161,36 +187,44 @@ def parse_cdb(path: Path) -> Model:
                         alp=old.alp,
                         reft=old.reft,
                         creep=old.creep,
+                        plasticity=old.plasticity,
+                        temp_tables=temp_tables,
                     )
                 elif prop in {"DENS"}:
                     model.materials[mat_id] = Material(
-                        id=mat_id,
+                        id=old.id,
                         ex=old.ex,
                         nuxy=old.nuxy,
                         dens=value,
                         alp=old.alp,
                         reft=old.reft,
                         creep=old.creep,
+                        plasticity=old.plasticity,
+                        temp_tables=temp_tables,
                     )
                 elif prop in {"ALPX"}:
                     model.materials[mat_id] = Material(
-                        id=mat_id,
+                        id=old.id,
                         ex=old.ex,
                         nuxy=old.nuxy,
                         dens=old.dens,
                         alp=value,
                         reft=old.reft,
                         creep=old.creep,
+                        plasticity=old.plasticity,
+                        temp_tables=temp_tables,
                     )
                 elif prop in {"REFT"}:
                     model.materials[mat_id] = Material(
-                        id=mat_id,
+                        id=old.id,
                         ex=old.ex,
                         nuxy=old.nuxy,
                         dens=old.dens,
                         alp=old.alp,
                         reft=value,
                         creep=old.creep,
+                        plasticity=old.plasticity,
+                        temp_tables=temp_tables,
                     )
             i += 1
             continue
@@ -287,9 +321,36 @@ def parse_cdb(path: Path) -> Model:
                     alp=old.alp,
                     reft=old.reft,
                     creep=(float(c1), float(c2), float(c3), float(c4)),
+                    plasticity=old.plasticity,
+                    temp_tables=old.temp_tables,
+                    k_bourdon_scale=old.k_bourdon_scale,
                 )
 
             i = j
+            continue
+
+        if line.startswith("BHPADD"):  # custom: Bourdon scale factor (optional)
+            args = _split_csv_args(line)
+            if len(args) >= 3:
+                try:
+                    mat_id = int(args[1])
+                    scale = float(args[2])
+                    old = model.materials.get(mat_id, Material(id=mat_id, ex=0.0, nuxy=0.0))
+                    model.materials[mat_id] = Material(
+                        id=old.id,
+                        ex=old.ex,
+                        nuxy=old.nuxy,
+                        dens=old.dens,
+                        alp=old.alp,
+                        reft=old.reft,
+                        creep=old.creep,
+                        plasticity=old.plasticity,
+                        temp_tables=old.temp_tables,
+                        k_bourdon_scale=scale,
+                    )
+                except Exception:
+                    pass
+            i += 1
             continue
 
         if line.startswith("NSUBST"):

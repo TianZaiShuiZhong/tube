@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..model import Model
+from ..model import Model, Material
 
 
 _DOF_ORDER = ("UX", "UY", "UZ", "ROTX", "ROTY", "ROTZ", "OVAL")
@@ -152,6 +152,53 @@ def _beam3d_local_k(E: float, G: float, A: float, Iy: float, Iz: float, J: float
     return k
 
 
+def _interp_prop(mat: Material, key: str, temp: float | None, default: float | None):
+    """Linear interpolation of temperature-dependent property."""
+    if temp is None:
+        return default
+    table = mat.temp_tables.get(key)
+    if not table:
+        return default
+    pts = sorted(table, key=lambda x: x[0])
+    for t, v in pts:
+        if abs(t - temp) < 1e-9:
+            return v
+    if temp <= pts[0][0]:
+        return pts[0][1]
+    if temp >= pts[-1][0]:
+        return pts[-1][1]
+    for (t0, v0), (t1, v1) in zip(pts[:-1], pts[1:]):
+        if t0 <= temp <= t1:
+            alpha = (temp - t0) / (t1 - t0)
+            return v0 + alpha * (v1 - v0)
+    return default
+
+
+def _circle_from_three(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray) -> tuple[float, np.ndarray, np.ndarray] | None:
+    """Compute circle radius, center, and normal from three non-collinear points."""
+    v1 = p2 - p1
+    v2 = p3 - p1
+    n = np.cross(v1, v2)
+    n_norm = float(np.linalg.norm(n))
+    if n_norm < 1e-9:
+        return None
+    n = n / n_norm
+    v1_sq = np.dot(v1, v1)
+    v2_sq = np.dot(v2, v2)
+    # perpendicular bisector intersection in plane
+    mat3 = np.column_stack([v1, v2, n])
+    rhs = 0.5 * np.array([v1_sq, v2_sq, np.dot(n, p1)], dtype=float)
+    try:
+        sol = np.linalg.solve(mat3, rhs)
+    except np.linalg.LinAlgError:
+        return None
+    center = p1 + sol[0] * v1 + sol[1] * v2
+    radius = float(np.linalg.norm(p1 - center))
+    if radius < 1e-9:
+        return None
+    return radius, center, n
+
+
 def _rotation_from_x_and_hint(x: np.ndarray, hint: np.ndarray) -> np.ndarray:
     ex = x / np.linalg.norm(x)
     h = hint - np.dot(hint, ex) * ex
@@ -231,6 +278,11 @@ def assemble_linear_system(
     if not model.materials:
         raise ValueError("No materials parsed from CDB")
     mat = model.materials[min(model.materials.keys())]
+    temp_use = model.uniform_temperature if model.uniform_temperature is not None else mat.reft
+    ex_eff = _interp_prop(mat, "EX", temp_use, mat.ex)
+    nu_eff = _interp_prop(mat, "NUXY", temp_use, mat.nuxy)
+    alp_eff = _interp_prop(mat, "ALPX", temp_use, mat.alp)
+    dens_eff = _interp_prop(mat, "DENS", temp_use, mat.dens)
 
     if not model.sections:
         raise ValueError("No sections parsed from CDB")
@@ -239,9 +291,16 @@ def assemble_linear_system(
     ro, ri, A, Iy, J = _section_props_pipe(sec.outer_diameter, sec.thickness)
     Iz = Iy
 
-    E = mat.ex
-    nu = mat.nuxy
+    E = ex_eff
+    nu = nu_eff
     G = E / (2.0 * (1.0 + nu))
+    ai = math.pi * (ri**2)
+
+    p_by_elem: dict[int, float] = {}
+    p_default: float | None = None
+    if model.elem_pressures:
+        p_by_elem = {ep.elem: ep.value for ep in model.elem_pressures}
+        p_default = float(sum(ep.value for ep in model.elem_pressures) / len(model.elem_pressures))
 
     elem_infos: list[ElementKinematics] = []
 
@@ -257,29 +316,41 @@ def assemble_linear_system(
         if L <= 0:
             continue
 
-        hint = np.array([0.0, 0.0, 1.0])
         on = e.orientation_node()
-        if on is not None and on in model.nodes:
-            op = np.array([model.nodes[on].x, model.nodes[on].y, model.nodes[on].z], dtype=float)
-            hint = op - p1
-
-        # Estimate curvature for ELBOW290 elements
         curvature = 0.0
-        if e.etype == 290 and on is not None and on in model.nodes:
-            # Assume N3 is the center of curvature or defines the arc
-            # Heuristic: if N1, N2, N3 form an isosceles triangle with N3 as apex
-            v1 = p1 - op
-            v2 = p2 - op
-            r1 = np.linalg.norm(v1)
-            r2 = np.linalg.norm(v2)
-            if r1 > 1e-6 and r2 > 1e-6 and abs(r1 - r2) / (r1 + r2) < 0.1:
-                # Likely center of curvature
-                curvature = 1.0 / ((r1 + r2) / 2.0)
-            else:
-                # Fallback: try to infer from adjacent elements or assume straight
-                pass
+        R = None
 
-        R = _rotation_from_x_and_hint(dx, hint)
+        if e.etype == 290 and on is not None and on in model.nodes:
+            p3 = np.array([model.nodes[on].x, model.nodes[on].y, model.nodes[on].z], dtype=float)
+            circle = _circle_from_three(p1, p2, p3)
+            if circle is not None:
+                r, center, normal = circle
+                t1 = np.cross(normal, (p1 - center))
+                t2 = np.cross(normal, (p2 - center))
+                if np.linalg.norm(t1) > 1e-9 and np.linalg.norm(t2) > 1e-9:
+                    t1 = t1 / np.linalg.norm(t1)
+                    t2 = t2 / np.linalg.norm(t2)
+                    dot = float(np.clip(np.dot(t1, t2), -1.0, 1.0))
+                    ang = float(math.acos(dot))
+                    if ang > 1e-6:
+                        L = r * ang
+                        curvature = 1.0 / r
+                        t_mid = t1 + t2
+                        if np.linalg.norm(t_mid) < 1e-9:
+                            t_mid = t1
+                        t_mid = t_mid / np.linalg.norm(t_mid)
+                        b_vec = np.cross(normal, t_mid)
+                        if np.linalg.norm(b_vec) < 1e-9:
+                            b_vec = t_mid
+                        b_vec = b_vec / np.linalg.norm(b_vec)
+                        R = np.column_stack([t_mid, b_vec, normal])
+        if R is None:
+            hint = np.array([0.0, 0.0, 1.0])
+            if on is not None and on in model.nodes:
+                op = np.array([model.nodes[on].x, model.nodes[on].y, model.nodes[on].z], dtype=float)
+                hint = op - p1
+            R = _rotation_from_x_and_hint(dx, hint)
+
         T = _beam_T(R)
 
         k_local = _beam3d_local_k(E, G, A, Iy, Iz, J, L, ro, ri, nu, curvature=curvature)
@@ -300,20 +371,35 @@ def assemble_linear_system(
         elem_infos.append(ElementKinematics(eid=e.id, n1=n1, n2=n2, L=L, R=R, T=T, dofs=dofs_arr))
 
         # self weight
-        if model.accel is not None and mat.dens is not None:
+        if model.accel is not None and dens_eff is not None:
             ax, ay, az = model.accel
             gvec = np.array([ax, ay, az], dtype=float)
-            qg = mat.dens * A * gvec
+            qg = dens_eff * A * gvec
             ql = R.T @ qg
             f_local = _udl_equiv_nodal_local(wx=ql[0], wy=ql[1], wz=ql[2], L=L)
             f_global = T.T @ f_local
             F[dofs_arr] += f_global
 
+        # curved pressure load (Bourdon-like) per element when curvature is known
+        if enable_pressure_equiv and curvature > 0.0 and model.elem_pressures:
+            p_elem = None
+            if e.id in p_by_elem:
+                p_elem = p_by_elem[e.id]
+            elif p_default is not None:
+                p_elem = p_default
+            if p_elem is not None:
+                scale = mat.k_bourdon_scale if mat.k_bourdon_scale is not None else 1.0
+                q_global = (-p_elem * ai * curvature * scale) * R[:, 2]  # normal points to center, force outward
+                q_local = R.T @ q_global
+                f_local = _udl_equiv_nodal_local(wx=q_local[0], wy=q_local[1], wz=q_local[2], L=L)
+                f_global = T.T @ f_local
+                F[dofs_arr] += f_global
+
         # initial strain: thermal + extra (creep)
         eps0 = 0.0
-        if model.uniform_temperature is not None and mat.alp is not None and mat.reft is not None:
+        if model.uniform_temperature is not None and alp_eff is not None and mat.reft is not None:
             dT = model.uniform_temperature - mat.reft
-            eps0 += mat.alp * dT
+            eps0 += alp_eff * dT
         if extra_initial_strain_by_elem is not None:
             eps0 += float(extra_initial_strain_by_elem.get(e.id, 0.0))
 
