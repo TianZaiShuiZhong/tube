@@ -4,7 +4,7 @@ import math
 from pathlib import Path
 from typing import Sequence
 
-from ..model import Model, FourierModalState
+from ..model import Model, FourierModalState, Node
 
 
 def _safe_dir(p0: tuple[float, float, float], p1: tuple[float, float, float]):
@@ -156,38 +156,79 @@ def write_pipe_surface_quads(
             pts = []
             quads = []
             modal_radii = []
+            ring_centers = []
             
             # Build center coordinates, removing consecutive duplicates (zero-length segments)
             raw_centers = [model.nodes[nid] for nid in p_nodes]
-            centers: list = []
-            node_map: list = []
+            centers: list[Node] = []
             tol = 1e-9
             for nd in raw_centers:
                 if not centers:
                     centers.append(nd)
-                    node_map.append(nd)
                 else:
                     prev = centers[-1]
                     if abs(prev.x - nd.x) < tol and abs(prev.y - nd.y) < tol and abs(prev.z - nd.z) < tol:
                         # skip duplicate center
                         continue
                     centers.append(nd)
-                    node_map.append(nd)
+
+            # Corner smoothing: insert short offset points around sharp bends to avoid pinched quads
+            smoothed: list[Node] = []
+            if centers:
+                smoothed.append(centers[0])
+            for i in range(1, len(centers) - 1):
+                c_prev, c_cur, c_next = centers[i - 1], centers[i], centers[i + 1]
+                p_prev = (c_prev.x, c_prev.y, c_prev.z)
+                p_cur = (c_cur.x, c_cur.y, c_cur.z)
+                p_next = (c_next.x, c_next.y, c_next.z)
+                d_prev = _safe_dir(p_prev, p_cur)
+                d_next = _safe_dir(p_cur, p_next)
+                # angle magnitude
+                dot = max(-1.0, min(1.0, d_prev[0] * d_next[0] + d_prev[1] * d_next[1] + d_prev[2] * d_next[2]))
+                angle = math.acos(dot)
+                # distance along legs
+                len_prev = math.sqrt((p_cur[0] - p_prev[0]) ** 2 + (p_cur[1] - p_prev[1]) ** 2 + (p_cur[2] - p_prev[2]) ** 2)
+                len_next = math.sqrt((p_next[0] - p_cur[0]) ** 2 + (p_next[1] - p_cur[1]) ** 2 + (p_next[2] - p_cur[2]) ** 2)
+                smooth_len = min(0.5 * min(len_prev, len_next), radius)
+                if angle > 1e-3 and smooth_len > 0:
+                    # point slightly before the corner along incoming leg
+                    smoothed.append(
+                        Node(
+                            id=c_cur.id,
+                            x=c_cur.x - d_prev[0] * smooth_len,
+                            y=c_cur.y - d_prev[1] * smooth_len,
+                            z=c_cur.z - d_prev[2] * smooth_len,
+                        )
+                    )
+                    # actual corner
+                    smoothed.append(c_cur)
+                    # point slightly after the corner along outgoing leg
+                    smoothed.append(
+                        Node(
+                            id=c_cur.id,
+                            x=c_cur.x + d_next[0] * smooth_len,
+                            y=c_cur.y + d_next[1] * smooth_len,
+                            z=c_cur.z + d_next[2] * smooth_len,
+                        )
+                    )
+                else:
+                    smoothed.append(c_cur)
+            if len(centers) > 1:
+                smoothed.append(centers[-1])
+            centers = smoothed
 
             # Compute smooth tangents using forward/backward averaging to avoid flipped frames
             frames = []
-            tangents = []
+            tangents: list[tuple[float, float, float]] = []
             for i in range(len(centers)):
                 if i == 0:
                     p0 = (centers[i].x, centers[i].y, centers[i].z)
                     p1 = (centers[i + 1].x, centers[i + 1].y, centers[i + 1].z)
-                    d1 = _safe_dir(p0, p1)
-                    d = d1
+                    d = _safe_dir(p0, p1)
                 elif i == len(centers) - 1:
                     p0 = (centers[i - 1].x, centers[i - 1].y, centers[i - 1].z)
                     p1 = (centers[i].x, centers[i].y, centers[i].z)
-                    d2 = _safe_dir(p0, p1)
-                    d = d2
+                    d = _safe_dir(p0, p1)
                 else:
                     p_prev = (centers[i - 1].x, centers[i - 1].y, centers[i - 1].z)
                     p_curr = (centers[i].x, centers[i].y, centers[i].z)
@@ -196,7 +237,7 @@ def write_pipe_surface_quads(
                     v_next = (p_next[0] - p_curr[0], p_next[1] - p_curr[1], p_next[2] - p_curr[2])
                     d_prev = _safe_dir(p_prev, p_curr)
                     d_next = _safe_dir(p_curr, p_next)
-                    # Use a length-weighted bisector to round corners smoothly
+                    # length-weighted bisector to smooth the tangent direction
                     len_prev = math.sqrt(v_prev[0] * v_prev[0] + v_prev[1] * v_prev[1] + v_prev[2] * v_prev[2])
                     len_next = math.sqrt(v_next[0] * v_next[0] + v_next[1] * v_next[1] + v_next[2] * v_next[2])
                     w_prev = len_prev if len_prev > 0 else 1.0
@@ -207,25 +248,60 @@ def write_pipe_surface_quads(
                         w_prev * d_prev[2] + w_next * d_next[2],
                     )
                     nd = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
-                    if nd == 0:
-                        d = d_next
-                    else:
-                        d = (d[0] / nd, d[1] / nd, d[2] / nd)
+                    d = d_next if nd == 0 else (d[0] / nd, d[1] / nd, d[2] / nd)
                 tangents.append(d)
-                u, v = _orthonormal(d)
-                # ensure continuity: flip if inconsistent with previous u
-                if frames:
-                    pu, pv = frames[-1]
-                    dot = pu[0] * u[0] + pu[1] * u[1] + pu[2] * u[2]
-                    if dot < 0:
-                        u = (-u[0], -u[1], -u[2])
-                        v = (-v[0], -v[1], -v[2])
-                frames.append((u, v))
+
+                if not frames:
+                    u, v = _orthonormal(d)
+                    frames.append((u, v))
+                else:
+                    # Parallel transport previous frame onto new tangent to avoid sudden twist
+                    prev_u, prev_v = frames[-1]
+                    d_prev = tangents[-2]
+                    # rotation axis
+                    w = (
+                        d_prev[1] * d[2] - d_prev[2] * d[1],
+                        d_prev[2] * d[0] - d_prev[0] * d[2],
+                        d_prev[0] * d[1] - d_prev[1] * d[0],
+                    )
+                    w_norm = math.sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2])
+                    if w_norm < 1e-12:
+                        u, v = prev_u, prev_v
+                    else:
+                        wx, wy, wz = w[0] / w_norm, w[1] / w_norm, w[2] / w_norm
+                        dot = d_prev[0] * d[0] + d_prev[1] * d[1] + d_prev[2] * d[2]
+                        dot = max(-1.0, min(1.0, dot))
+                        angle = math.acos(dot)
+
+                        def rotate(vec):
+                            vx, vy, vz = vec
+                            cos_a = math.cos(angle)
+                            sin_a = math.sin(angle)
+                            return (
+                                vx * cos_a + (wy * vz - wz * vy) * sin_a + wx * (wx * vx + wy * vy + wz * vz) * (1 - cos_a),
+                                vy * cos_a + (wz * vx - wx * vz) * sin_a + wy * (wx * vx + wy * vy + wz * vz) * (1 - cos_a),
+                                vz * cos_a + (wx * vy - wy * vx) * sin_a + wz * (wx * vx + wy * vy + wz * vz) * (1 - cos_a),
+                            )
+
+                        u = rotate(prev_u)
+                        v = rotate(prev_v)
+                        # re-orthonormalize
+                        u_len = math.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2])
+                        u = (u[0] / u_len, u[1] / u_len, u[2] / u_len)
+                        v = (
+                            d[1] * u[2] - d[2] * u[1],
+                            d[2] * u[0] - d[0] * u[2],
+                            d[0] * u[1] - d[1] * u[0],
+                        )
+                        v_len = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+                        v = (v[0] / v_len, v[1] / v_len, v[2] / v_len)
+                    frames.append((u, v))
             
             ring_offset = []
             for i, c in enumerate(centers):
                 u, v = frames[i]
                 ring_offset.append(len(pts))
+                ring_centers.append((c.x, c.y, c.z))
                 # per-node radius: if different radii are expected per section, user can extend here
                 r = radius
                 for k in range(n_circ):
@@ -239,12 +315,32 @@ def write_pipe_surface_quads(
             for i in range(len(centers) - 1):
                 r0 = ring_offset[i]
                 r1 = ring_offset[i + 1]
+                c0 = ring_centers[i]
+                c1 = ring_centers[i + 1]
                 for k in range(n_circ):
                     a = r0 + k
                     b = r0 + ((k + 1) % n_circ)
                     c_idx = r1 + ((k + 1) % n_circ)
                     d_idx = r1 + k
-                    quads.append((a, b, c_idx, d_idx))
+                    pa = pts[a]
+                    pb = pts[b]
+                    pc = pts[c_idx]
+                    pd = pts[d_idx]
+                    # Ensure consistent outward normal even through sharp bends
+                    normal = (
+                        (pb[1] - pa[1]) * (pc[2] - pa[2]) - (pb[2] - pa[2]) * (pc[1] - pa[1]),
+                        (pb[2] - pa[2]) * (pc[0] - pa[0]) - (pb[0] - pa[0]) * (pc[2] - pa[2]),
+                        (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0]),
+                    )
+                    radial = (
+                        (pa[0] - c0[0]) + (pb[0] - c0[0]) + (pc[0] - c1[0]) + (pd[0] - c1[0]),
+                        (pa[1] - c0[1]) + (pb[1] - c0[1]) + (pc[1] - c1[1]) + (pd[1] - c1[1]),
+                        (pa[2] - c0[2]) + (pb[2] - c0[2]) + (pc[2] - c1[2]) + (pd[2] - c1[2]),
+                    )
+                    if normal[0] * radial[0] + normal[1] * radial[1] + normal[2] * radial[2] < 0:
+                        quads.append((a, d_idx, c_idx, b))
+                    else:
+                        quads.append((a, b, c_idx, d_idx))
 
         # Merge into global list
         base_idx = len(all_pts)

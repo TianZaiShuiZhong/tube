@@ -10,7 +10,7 @@ from typing import Sequence
 
 import numpy as np
 
-from ..model import Model, FourierModalState
+from ..model import Model, FourierModalState, Node
 
 
 def compute_modal_displacement_at_angle(
@@ -93,7 +93,7 @@ def expand_surface_with_modal(
 
     # Remove consecutive duplicate points to avoid zero-length tangents
     centers_raw = [model.nodes[nid] for nid in centerline_nodes]
-    centers: list = []
+    centers: list[Node] = []
     node_ids: list[int] = []
     tol = 1e-9
     for nid, nd in zip(centerline_nodes, centers_raw):
@@ -107,11 +107,47 @@ def expand_surface_with_modal(
         centers.append(nd)
         node_ids.append(nid)
 
+    # Corner smoothing: insert offset points to avoid pinching at sharp angles
+    smoothed: list[Node] = []
+    smoothed_ids: list[int] = []
+    if centers:
+        smoothed.append(centers[0])
+        smoothed_ids.append(node_ids[0])
+    for i in range(1, len(centers) - 1):
+        c_prev, c_cur, c_next = centers[i - 1], centers[i], centers[i + 1]
+        id_cur = node_ids[i]
+        p_prev = np.array([c_prev.x, c_prev.y, c_prev.z])
+        p_cur = np.array([c_cur.x, c_cur.y, c_cur.z])
+        p_next = np.array([c_next.x, c_next.y, c_next.z])
+        d_prev = _safe_dir(p_prev, p_cur)
+        d_next = _safe_dir(p_cur, p_next)
+        dot = float(np.clip(np.dot(d_prev, d_next), -1.0, 1.0))
+        angle = math.acos(dot)
+        len_prev = float(np.linalg.norm(p_cur - p_prev))
+        len_next = float(np.linalg.norm(p_next - p_cur))
+        smooth_len = min(0.5 * min(len_prev, len_next), radius)
+        if angle > 1e-3 and smooth_len > 0:
+            smoothed.append(Node(id=id_cur, x=c_cur.x - d_prev[0] * smooth_len, y=c_cur.y - d_prev[1] * smooth_len, z=c_cur.z - d_prev[2] * smooth_len))
+            smoothed_ids.append(id_cur)
+            smoothed.append(c_cur)
+            smoothed_ids.append(id_cur)
+            smoothed.append(Node(id=id_cur, x=c_cur.x + d_next[0] * smooth_len, y=c_cur.y + d_next[1] * smooth_len, z=c_cur.z + d_next[2] * smooth_len))
+            smoothed_ids.append(id_cur)
+        else:
+            smoothed.append(c_cur)
+            smoothed_ids.append(id_cur)
+    if len(centers) > 1:
+        smoothed.append(centers[-1])
+        smoothed_ids.append(node_ids[-1])
+    centers = smoothed
+    node_ids = smoothed_ids
+
     if len(centers) < 2:
         return [], [], []
 
-    # Build smooth, continuous frames along the path to avoid orientation flips
+    # Build smooth, continuous frames along the path using parallel transport
     frames = []
+    tangents: list[np.ndarray] = []
     for i in range(len(centers)):
         if i == 0:
             p0 = np.array([centers[i].x, centers[i].y, centers[i].z])
@@ -136,22 +172,48 @@ def expand_surface_with_modal(
             d = w_prev * d_prev + w_next * d_next
             nd = np.linalg.norm(d)
             d = d_next if nd == 0 else (d / nd)
+        tangents.append(d)
 
-        u, v = _orthonormal(d)
-        if frames:
-            prev_u, _ = frames[-1]
-            if float(np.dot(prev_u, u)) < 0.0:
-                u = -u
-                v = -v
-        frames.append((u, v))
+        if not frames:
+            u, v = _orthonormal(d)
+            frames.append((u, v))
+        else:
+            prev_u, prev_v = frames[-1]
+            d_prev = tangents[-2]
+            w = np.cross(d_prev, d)
+            w_norm = float(np.linalg.norm(w))
+            if w_norm < 1e-12:
+                u, v = prev_u, prev_v
+            else:
+                w /= w_norm
+                dot = float(np.clip(np.dot(d_prev, d), -1.0, 1.0))
+                angle = math.acos(dot)
+
+                def rotate(vec: np.ndarray) -> np.ndarray:
+                    cos_a = math.cos(angle)
+                    sin_a = math.sin(angle)
+                    return (
+                        vec * cos_a
+                        + np.cross(w, vec) * sin_a
+                        + w * (np.dot(w, vec)) * (1 - cos_a)
+                    )
+
+                u = rotate(prev_u)
+                v = rotate(prev_v)
+                u = u / np.linalg.norm(u)
+                v = np.cross(d, u)
+                v = v / np.linalg.norm(v)
+            frames.append((u, v))
 
     pts = []
     modal_radii = []
     ring_offset = []
+    ring_centers: list[tuple[float, float, float]] = []
     
     for i, c in enumerate(centers):
         u, v = frames[i]
         ring_offset.append(len(pts))
+        ring_centers.append((c.x, c.y, c.z))
         
         nid = node_ids[i]
         modal_amps = {}
@@ -181,11 +243,22 @@ def expand_surface_with_modal(
     for i in range(len(centers) - 1):
         r0 = ring_offset[i]
         r1 = ring_offset[i + 1]
+        c0 = np.array(ring_centers[i])
+        c1 = np.array(ring_centers[i + 1])
         for k in range(n_circ):
             a = r0 + k
             b = r0 + ((k + 1) % n_circ)
             c_idx = r1 + ((k + 1) % n_circ)
             d_idx = r1 + k
-            quads.append((a, b, c_idx, d_idx))
-    
+            pa = np.array(pts[a])
+            pb = np.array(pts[b])
+            pc = np.array(pts[c_idx])
+            pd = np.array(pts[d_idx])
+            normal = np.cross(pb - pa, pc - pa)
+            radial = (pa - c0) + (pb - c0) + (pc - c1) + (pd - c1)
+            if float(np.dot(normal, radial)) < 0.0:
+                quads.append((a, d_idx, c_idx, b))
+            else:
+                quads.append((a, b, c_idx, d_idx))
+
     return pts, quads, modal_radii
